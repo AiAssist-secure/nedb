@@ -644,6 +644,211 @@ impl Db {
         Ok(true)
     }
 
+    // ── State roots ───────────────────────────────────────────────────────
+    //
+    // See `crate::root` for the format and for why the leaves are logical
+    // content rather than object hashes.
+
+    /// Every live document, as the material a root is computed from.
+    fn live_records(&self) -> Vec<Node> {
+        let mut out = Vec::new();
+        for coll in self.collections() {
+            for id in self.id_index.list_ids(&coll) {
+                if let Some(n) = self.get(&coll, &id) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// The database's current state root.
+    ///
+    /// A stateless recomputation over live state, not a maintained tree. That
+    /// is a deliberate v1 choice: an incrementally-updated Merkle tree is a
+    /// second source of truth that can silently drift from the first, and the
+    /// cost of being wrong about a root is much higher than the cost of
+    /// recomputing one.
+    pub fn state_root(&self) -> std::result::Result<crate::root::StateRoot, String> {
+        let colls = self.collections();
+        let nodes = self.live_records();
+        let refs: Vec<crate::root::RecordRef<'_>> = nodes.iter()
+            .map(|n| crate::root::RecordRef {
+                coll: &n.coll,
+                id: &n.id,
+                data: &n.data,
+                valid_from: n.valid_from.as_deref(),
+                valid_to: n.valid_to.as_deref(),
+            })
+            .collect();
+        crate::root::compute(&colls, &refs)
+    }
+
+    /// The state root as of a sequence.
+    ///
+    /// Reuses the same enumeration `AS OF` queries already use — live ids plus
+    /// the graveyard — so a historical root sees exactly what a historical
+    /// query would see. Anything else would be a root for a state no query can
+    /// return.
+    ///
+    /// `None` when the material is gone: `compact` prunes superseded versions,
+    /// and a root over history that has been discarded cannot be recomputed.
+    /// Reported as unavailable rather than approximated.
+    pub fn state_root_as_of(&self, target_seq: u64)
+        -> std::result::Result<crate::root::StateRoot, String>
+    {
+        let colls = self.collections_as_of(target_seq);
+        let mut nodes = Vec::new();
+        for coll in &colls {
+            for id in self.list_ids_including_deleted(coll) {
+                if let Some(n) = self.get_as_of(coll, &id, target_seq) {
+                    nodes.push(n);
+                }
+            }
+        }
+        let refs: Vec<crate::root::RecordRef<'_>> = nodes.iter()
+            .map(|n| crate::root::RecordRef {
+                coll: &n.coll,
+                id: &n.id,
+                data: &n.data,
+                valid_from: n.valid_from.as_deref(),
+                valid_to: n.valid_to.as_deref(),
+            })
+            .collect();
+        crate::root::compute(&colls, &refs)
+    }
+
+    // ── Persisted root records ────────────────────────────────────────────
+
+    /// Persist the state root as of a sequence.
+    ///
+    /// Creation and BACKFILL are the same operation with different arguments,
+    /// and they are deliberately not the same COMMAND: `at_seq` at the tip is
+    /// O(live state), while `at_seq` in the past is O(live state) plus a
+    /// version-chain walk per document. Hiding the second behind something
+    /// that looks like the first is how an operator discovers the cost by
+    /// waiting.
+    pub fn create_root_at(&self, at_seq: u64) -> Result<crate::root::RootRecord> {
+        let computed = self.state_root_as_of(at_seq)
+            .map_err(|e| anyhow::anyhow!("compute root at seq {}: {}", at_seq, e))?;
+        let rec = crate::root::RootRecord { at_seq, root: computed };
+        let data = serde_json::to_value(&rec)?;
+        self.put_unchecked(
+            crate::namespace::ROOTS,
+            &crate::namespace::seq_id(at_seq),
+            data, vec![], None, None,
+        )?;
+        Ok(rec)
+    }
+
+    /// Persist the state root at the current tip.
+    pub fn create_root(&self) -> Result<crate::root::RootRecord> {
+        // The tip is the last ASSIGNED seq, so one below the next one out.
+        let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
+        self.create_root_at(tip)
+    }
+
+    /// A persisted root record, if one was taken at this sequence.
+    pub fn get_root(&self, at_seq: u64) -> Option<crate::root::RootRecord> {
+        let n = self.get(crate::namespace::ROOTS, &crate::namespace::seq_id(at_seq))?;
+        serde_json::from_value(n.data).ok()
+    }
+
+    /// Every persisted root, oldest first.
+    pub fn list_roots(&self) -> Vec<crate::root::RootRecord> {
+        self.id_index
+            .list_ids(crate::namespace::ROOTS)
+            .into_iter()
+            .filter_map(|id| self.get(crate::namespace::ROOTS, &id))
+            .filter_map(|n| serde_json::from_value::<crate::root::RootRecord>(n.data).ok())
+            .collect()
+    }
+
+    /// Check a persisted root against a fresh recomputation.
+    ///
+    /// Two INDEPENDENT facts, reported independently:
+    ///
+    ///   - the record exists and is well-formed
+    ///   - the history needed to recompute it is still here
+    ///
+    /// A persisted root may outlive the material that produced it — `compact`
+    /// discards superseded versions, and after that a historical root is a
+    /// perfectly valid record of something no longer reconstructable. Folding
+    /// that into PASS would claim a verification that did not happen, and
+    /// folding it into FAIL would report tampering that did not occur. So it
+    /// is neither.
+    pub fn verify_root(&self, at_seq: u64) -> crate::root::RootVerification {
+        let record = match self.get_root(at_seq) {
+            None => return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Missing,
+                recomputation: crate::root::Recomputation::NotAttempted,
+                recomputed: None,
+            },
+            Some(r) => r,
+        };
+        if record.root.version != "state_root_v1" {
+            return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::UnknownVersion(record.root.version.clone()),
+                recomputation: crate::root::Recomputation::NotAttempted,
+                recomputed: None,
+            };
+        }
+        // The floor is the oldest sequence still reconstructable. Below it the
+        // material is gone and a mismatch would say nothing about integrity.
+        if at_seq < self.history_floor() {
+            return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Valid,
+                recomputation: crate::root::Recomputation::Unavailable(crate::root::UnavailableReason::HistoryPruned),
+                recomputed: None,
+            };
+        }
+        match self.state_root_as_of(at_seq) {
+            Err(e) => crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Valid,
+                recomputation: crate::root::Recomputation::Unavailable(crate::root::UnavailableReason::Other(e)),
+                recomputed: None,
+            },
+            Ok(fresh) => {
+                let agrees = fresh.state_root == record.root.state_root;
+                crate::root::RootVerification {
+                    at_seq,
+                    record: crate::root::RecordStatus::Valid,
+                    recomputation: if agrees {
+                        crate::root::Recomputation::Matches
+                    } else {
+                        crate::root::Recomputation::Differs
+                    },
+                    recomputed: Some(fresh),
+                }
+            }
+        }
+    }
+
+    /// The oldest sequence whose state can still be reconstructed.
+    ///
+    /// 0 until something prunes. `compact` records where it cut, because after
+    /// it runs the engine cannot otherwise tell "this sequence had no writes"
+    /// from "this sequence's writes were discarded" — and those two answers
+    /// differ by whether a failed verification means anything.
+    pub fn history_floor(&self) -> u64 {
+        self.get(crate::namespace::META, "history_floor")
+            .and_then(|n| n.data.get("floor").and_then(|v| v.as_u64()))
+            .unwrap_or(0)
+    }
+
+    fn set_history_floor(&self, floor: u64) -> Result<()> {
+        self.put_unchecked(
+            crate::namespace::META, "history_floor",
+            serde_json::json!({"floor": floor}),
+            vec![], None, None,
+        )?;
+        Ok(())
+    }
+
     /// Batch put: write N documents in parallel, preserving monotonic seq ordering.
     /// Pre-allocates N seq numbers atomically, then parallelises object writes and
     /// id-index updates via Rayon. Each op is independent — safe to parallelise.
@@ -862,7 +1067,18 @@ impl Db {
                 }
             }
         }
-        self.objects.compact(&live)
+        let stats = self.objects.compact(&live)?;
+
+        // Record where history now begins.
+        //
+        // Without this the engine cannot tell "no writes at that sequence"
+        // from "that sequence's writes were discarded", and the two differ by
+        // whether a failed root verification means anything. A verification
+        // that cannot say which one it hit has to report PASS or FAIL, and
+        // both are lies.
+        let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
+        self.set_history_floor(tip)?;
+        Ok(stats)
     }
 
     /// Flush MANIFEST to disk if dirty. No-op for in-memory databases.
@@ -2680,5 +2896,212 @@ mod collection_identity {
             "and must not have written the acceptable half of itself first"
         );
         assert!(db.collections().is_empty());
+    }
+}
+
+/// State roots against a live engine: does the root actually track state, and
+/// does verification tell the truth about what it could and could not check?
+#[cfg(test)]
+mod state_roots {
+    use super::*;
+    use crate::root::{RecordStatus, Recomputation, UnavailableReason};
+    use tempfile::tempdir;
+
+    fn j(v: u64) -> serde_json::Value { serde_json::json!({"v": v}) }
+
+    #[test]
+    fn an_empty_database_has_a_stable_nonzero_root() {
+        let a = Db::in_memory().state_root().unwrap();
+        let b = Db::in_memory().state_root().unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a.state_root, "0".repeat(64));
+        assert_eq!(a.collection_count, 0);
+        assert_eq!(a.record_count, 0);
+    }
+
+    /// The invariance the whole format exists for.
+    #[test]
+    fn disk_and_memory_agree_on_the_root_of_the_same_history() {
+        let dir = tempdir().unwrap();
+        let disk = Db::open(dir.path(), None).unwrap();
+        let mem = Db::in_memory();
+        for db in [&disk, &mem] {
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            db.put("orders", "2", j(2), vec![], None, None).unwrap();
+            db.put("users", "u", j(9), vec![], None, None).unwrap();
+        }
+        assert_eq!(disk.state_root().unwrap(), mem.state_root().unwrap());
+    }
+
+    /// Encryption changes object hashes; it must not change the root.
+    #[test]
+    fn an_encrypted_replica_has_the_same_root_as_a_plaintext_one() {
+        let plain_dir = tempdir().unwrap();
+        let enc_dir = tempdir().unwrap();
+        let plain = Db::open(plain_dir.path(), None).unwrap();
+        let enc = Db::open(enc_dir.path(), Some(crate::store::Dek([7u8; 32]))).unwrap();
+        for db in [&plain, &enc] {
+            db.put("orders", "1", serde_json::json!({"total": 100}), vec![], None, None).unwrap();
+        }
+        assert_ne!(
+            plain.get("orders", "1").unwrap().hash,
+            enc.get("orders", "1").unwrap().hash,
+            "precondition: encryption really does change the object hash"
+        );
+        assert_eq!(
+            plain.state_root().unwrap(), enc.state_root().unwrap(),
+            "but the root commits to logical content, so it must not move"
+        );
+    }
+
+    #[test]
+    fn the_root_moves_when_the_state_moves_and_not_otherwise() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let a = db.state_root().unwrap().state_root;
+
+        // A no-op rewrite of the same value: new node, new seq, same state.
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        assert_eq!(db.state_root().unwrap().state_root, a,
+            "the root commits to state, not to how many times you wrote it");
+
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+        assert_ne!(db.state_root().unwrap().state_root, a);
+    }
+
+    #[test]
+    fn a_delete_removes_a_record_but_keeps_the_collection() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        let r = db.state_root().unwrap();
+        assert_eq!(r.record_count, 0, "a tombstoned document is not live state");
+        assert_eq!(r.collection_count, 1, "but its collection still exists");
+
+        let never = Db::in_memory();
+        assert_ne!(r.state_root, never.state_root().unwrap().state_root);
+    }
+
+    #[test]
+    fn a_historical_root_matches_what_the_tip_root_was_at_that_time() {
+        let db = Db::in_memory();
+        let a = db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let then = db.state_root().unwrap();
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        assert_ne!(db.state_root().unwrap().state_root, then.state_root);
+        assert_eq!(
+            db.state_root_as_of(a.seq).unwrap().state_root, then.state_root,
+            "AS OF the first write is the state after the first write"
+        );
+    }
+
+    #[test]
+    fn a_persisted_root_verifies_against_a_fresh_recomputation() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+
+        let v = db.verify_root(rec.at_seq);
+        assert_eq!(v.record, RecordStatus::Valid);
+        assert_eq!(v.recomputation, Recomputation::Matches);
+        assert!(v.is_verified());
+        assert!(!v.is_mismatch());
+        assert_eq!(v.exit_code(), 0);
+    }
+
+    /// Taking a root must not change the state it describes.
+    #[test]
+    fn taking_a_root_does_not_change_the_root() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let before = db.state_root().unwrap().state_root.clone();
+        db.create_root().unwrap();
+        db.create_root().unwrap();
+        assert_eq!(db.state_root().unwrap().state_root, before,
+            "root records are reserved, so they are not part of the state");
+    }
+
+    #[test]
+    fn later_writes_do_not_retroactively_change_an_old_root() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        db.put("orders", "1", j(99), vec![], None, None).unwrap();
+
+        let v = db.verify_root(rec.at_seq);
+        assert!(v.is_verified(), "a root is a statement about a sequence, not about now");
+    }
+
+    #[test]
+    fn a_missing_root_is_reported_as_missing_not_as_a_failure() {
+        let db = Db::in_memory();
+        let v = db.verify_root(42);
+        assert_eq!(v.record, RecordStatus::Missing);
+        assert_eq!(v.recomputation, Recomputation::NotAttempted);
+        assert!(!v.is_verified());
+        assert!(!v.is_mismatch(), "absent is not wrong");
+        assert_eq!(v.exit_code(), 4);
+    }
+
+    /// The distinction the Oracle asked for, end to end on a real store.
+    #[test]
+    fn a_pruned_history_reports_unavailable_rather_than_pass_or_fail() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("NEDB_DAG_V3", "1");
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+        db.flush_all();
+
+        assert!(db.verify_root(rec.at_seq).is_verified(), "verifiable before the prune");
+
+        db.compact().expect("compact");
+        std::env::remove_var("NEDB_DAG_V3");
+
+        let v = db.verify_root(rec.at_seq);
+        assert_eq!(v.record, RecordStatus::Valid, "the record itself is still fine");
+        assert_eq!(
+            v.recomputation,
+            Recomputation::Unavailable(UnavailableReason::HistoryPruned),
+            "and the engine says plainly that it could not check it"
+        );
+        assert!(!v.is_verified(), "unavailable is not verified");
+        assert!(!v.is_mismatch(), "and it is not a mismatch either");
+        assert_eq!(v.exit_code(), 3, "its own exit code, distinct from pass and fail");
+    }
+
+    #[test]
+    fn roots_are_listed_in_sequence_order() {
+        let db = Db::in_memory();
+        for i in 0..12u64 {
+            db.put("c", &i.to_string(), j(i), vec![], None, None).unwrap();
+            db.create_root().unwrap();
+        }
+        let seqs: Vec<u64> = db.list_roots().iter().map(|r| r.at_seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort();
+        assert_eq!(seqs, sorted, "zero-padded ids must order numerically");
+        assert_eq!(seqs.len(), 12);
+    }
+
+    #[test]
+    fn a_root_survives_a_reopen(){
+        let dir = tempdir().unwrap();
+        let at;
+        let expected;
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            let r = db.create_root().unwrap();
+            at = r.at_seq;
+            expected = r.root.state_root.clone();
+            db.flush_all();
+        }
+        let db = Db::open(dir.path(), None).unwrap();
+        let got = db.get_root(at).expect("root record survives a reopen");
+        assert_eq!(got.root.state_root, expected);
+        assert!(db.verify_root(at).is_verified());
     }
 }

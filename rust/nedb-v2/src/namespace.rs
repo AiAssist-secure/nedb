@@ -58,6 +58,26 @@ pub const RESERVED_PREFIX: &str = "_nedb";
 /// each says whether that collection is currently live.
 pub const COLLECTIONS: &str = "_nedb.collections";
 
+/// Persisted state roots. Ids are zero-padded sequence numbers so that the
+/// index's lexicographic id ordering is also numeric ordering.
+///
+/// Reserved for the reason the reservation exists at all: a root record that
+/// counted as part of the state would change the state it describes, so
+/// computing one would immediately invalidate it.
+pub const ROOTS: &str = "_nedb.roots";
+
+/// Engine metadata that is neither a collection record nor a root: the history
+/// floor lives here. Kept out of `ROOTS` so that collection stays homogeneous
+/// and `list_roots` never has to skip an entry it cannot parse -- an entry
+/// skipped silently is indistinguishable from one that failed to parse.
+pub const META: &str = "_nedb.meta";
+
+/// Zero-padded so lexicographic ordering is numeric ordering. `u64::MAX` is 20
+/// digits.
+pub fn seq_id(seq: u64) -> String {
+    format!("{:020}", seq)
+}
+
 /// Is this name part of the engine's own namespace?
 pub fn is_reserved(coll: &str) -> bool {
     coll == RESERVED_PREFIX || coll.starts_with(&format!("{}.", RESERVED_PREFIX))

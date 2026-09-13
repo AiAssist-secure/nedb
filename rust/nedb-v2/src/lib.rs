@@ -23,6 +23,7 @@ pub mod segment;
 pub mod index;
 pub mod graph;
 pub mod namespace;
+pub mod root;
 pub mod migrate;
 pub mod db;
 pub mod exit;
