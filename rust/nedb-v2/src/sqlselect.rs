@@ -401,12 +401,36 @@ pub struct TableRef {
     /// before it, so it is re-evaluated once per row of those. psql's `\dP+`
     /// sizes each partitioned table this way.
     pub lateral: bool,
+    /// `FROM orders AS OF SYSTEM TIME 42` — read this relation at that NEDB
+    /// sequence instead of at the tip.
+    ///
+    /// It hangs on the TABLE rather than on the query for two reasons. It is
+    /// where PostgreSQL's own grammar would take it (`relation_expr`, the
+    /// production `table_ref` is built from), and it is the only placement that
+    /// can express the query worth having: one relation AS OF a past sequence
+    /// joined against another at the tip, which is how you ask what changed.
+    ///
+    /// A sequence, never a wall-clock time. NEDB's history is
+    /// sequence-addressed and never garbage-collected, so a seq is exact where
+    /// a timestamp would be approximate — the same refusal the translator has
+    /// always made, made in the same words.
+    pub as_of: Option<u64>,
+    /// `FROM orders VALID AS OF '2026-01-01'` — bi-temporal: what was believed
+    /// TRUE as of that date, as distinct from what the log SAID at a sequence.
+    /// A date string, because application-time validity is a wall-clock notion
+    /// where system time is a sequence.
+    pub valid_as_of: Option<String>,
+    /// `FROM orders SEARCH 'acme'` — full-text over the document's fields.
+    ///
+    /// Per-table like the others, which is the point: one relation searched
+    /// and another joined to it is a sentence SQL can now say.
+    pub search: Option<String>,
 }
 
 impl TableRef {
     /// A plain named relation.
     pub fn named(name: impl Into<String>, alias: Option<String>) -> Self {
-        TableRef { name: name.into(), alias, sub: None, args: None, col_aliases: vec![], lateral: false }
+        TableRef { name: name.into(), alias, sub: None, args: None, col_aliases: vec![], lateral: false, as_of: None, valid_as_of: None, search: None }
     }
 
     /// How this table's columns are addressed: the alias when given, else the
@@ -1226,6 +1250,9 @@ impl Parser {
                 args: None,
                 col_aliases,
                 lateral,
+                as_of: None,
+                valid_as_of: None,
+                search: None,
             });
         }
         if lateral {
@@ -1262,11 +1289,80 @@ impl Parser {
             }
             let fname = name.rsplit('.').next().unwrap_or(&name).to_lowercase();
             let (alias, col_aliases) = self.parse_table_alias()?;
-            return Ok(TableRef { name: fname, alias, sub: None, args: Some(args), col_aliases, lateral: false });
+            return Ok(TableRef { name: fname, alias, sub: None, args: Some(args), col_aliases, lateral: false, as_of: None, valid_as_of: None, search: None });
         }
 
+        // `AS OF SYSTEM TIME <seq>` is read BEFORE the alias, because `AS` is
+        // the first token of both this and `AS <alias>`. The word after `AS`
+        // decides which one it is, and `parse_table_alias` would otherwise
+        // consume `OF` as the alias and leave `SYSTEM TIME 42` in the stream.
+        let as_of = if self.peek().is_kw("AS") && self.peek_at(1).is_kw("OF") {
+            self.next();
+            self.next();
+            self.expect_kw("SYSTEM")?;
+            self.expect_kw("TIME")?;
+            match self.next() {
+                Tok::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(n as u64),
+                other => bail!(
+                    "AS OF SYSTEM TIME takes a NEDB sequence number here, not a timestamp \
+                     (got {:?}). NEDB's history is sequence-addressed and never \
+                     garbage-collected, so a seq is exact where a wall-clock time would be \
+                     approximate",
+                    other
+                ),
+            }
+        } else {
+            None
+        };
+        // ── NQL's own verbs, as table-level qualifiers ──────────────────────
+        //
+        // This is what "NQL folded into neSQL" means concretely: the verbs NQL
+        // has and SQL has no spelling for become qualifiers on the relation,
+        // so a SQL statement can SAY them and the SQL evaluator can compose
+        // joins, subqueries and set operations AROUND them. The NQL engine
+        // still executes them — the resolver renders them straight back into
+        // the NQL it asks for — so there is one implementation, not two.
+        //
+        // Both are UNRESERVED, and deliberately: `VALID` only starts a clause
+        // when `AS OF` follows, and `SEARCH` only when a string literal
+        // follows. So a collection aliased `search`, or a column named
+        // `valid`, keeps working — the same discipline the PostgreSQL grammar
+        // uses with `unreserved_keyword`, and the reason adding a verb does
+        // not break somebody's existing data.
+        let valid_as_of = if self.peek().is_kw("VALID")
+            && self.peek_at(1).is_kw("AS")
+            && self.peek_at(2).is_kw("OF")
+        {
+            self.next();
+            self.next();
+            self.next();
+            match self.next() {
+                Tok::Str(s) => Some(s),
+                other => bail!(
+                    "VALID AS OF takes a date string here (got {:?}). System time is a \
+                     sequence and application-time validity is a date — they are different \
+                     questions, so they take different arguments",
+                    other
+                ),
+            }
+        } else {
+            None
+        };
+
+        let search = if self.peek().is_kw("SEARCH") && matches!(self.peek_at(1), Tok::Str(_)) {
+            self.next();
+            match self.next() {
+                Tok::Str(s) => Some(s),
+                // Unreachable given the lookahead above, but an unreachable
+                // branch that bails is cheaper than one that panics.
+                other => bail!("SEARCH takes a string here, got {:?}", other),
+            }
+        } else {
+            None
+        };
+
         let (alias, col_aliases) = self.parse_table_alias()?;
-        Ok(TableRef { name, alias, sub: None, args: None, col_aliases, lateral: false })
+        Ok(TableRef { name, alias, sub: None, args: None, col_aliases, lateral: false, as_of, valid_as_of, search })
     }
 
     /// `AS alias`, or a bare alias, optionally followed by `(col, col)`.
@@ -3475,9 +3571,29 @@ fn execute_inner<'a>(
     }
 
     // ── 3. the output shape ─────────────────────────────────────────────────
-    // Resolved from the FIRST row when the select list contains a `*`,
-    // because only a row knows what columns a schemaless source has. With no
-    // rows at all a `*` yields no columns, which is the honest answer.
+    // Resolved from the ROWS when the select list contains a `*`, because only
+    // the rows know what columns a schemaless source has. With no rows at all
+    // a `*` yields no columns, which is the honest answer.
+    //
+    // From EVERY row, not the first one. Taking the first row's keys loses any
+    // field that only later documents carry, and it loses it SILENTLY: two
+    // documents `{a:1}` and `{a:2, later:"x"}` answered `SELECT *` with one
+    // column, and `later` — which is right there in the store — simply did not
+    // appear. A schemaless collection has no row that speaks for the others.
+    // The translator has always taken the union (`columns_for`), and the
+    // parity harness is what surfaced the disagreement.
+    //
+    // Ordering: the user's own fields in the DOCUMENT'S OWN ORDER, then the
+    // `_`-prefixed provenance columns sorted. Document order is a deliberate
+    // property — `serde_json`'s `preserve_order` feature is on crate-wide to
+    // make it possible — and it is what Postgres does, where `*` follows
+    // column definition order rather than the alphabet. Putting provenance
+    // last keeps `_hash` from pushing `status` off the screen.
+    //
+    // The first attempt at this sorted the user's fields alphabetically to
+    // match the TRANSLATOR, which had it backwards: the corpus pins document
+    // order deliberately, so the translator was the one diverging. It now
+    // sorts nothing but the provenance block either.
     //
     // `spans` records which output columns each select ITEM owns, so the
     // projection below never has to guess. The previous version walked a
@@ -3490,12 +3606,23 @@ fn execute_inner<'a>(
         let start = cols.len();
         match &item.expr {
             Expr::Star => {
-                if let Some(first) = rows.first() {
-                    for (n, _) in bind(first, ctx).flatten() {
+                let mut plain: Vec<String> = vec![];
+                let mut meta: Vec<String> = vec![];
+                for r in &rows {
+                    for (n, _) in bind(r, ctx).flatten() {
+                        let target = if n.starts_with('_') { &mut meta } else { &mut plain };
                         // A star never emits the same column twice.
-                        if !cols.iter().any(|c| c.name == n) {
-                            cols.push(OutCol { key: n.clone(), name: n });
+                        if !target.contains(&n) {
+                            target.push(n);
                         }
+                    }
+                }
+                // Only the provenance block is sorted; the user's fields keep
+                // the document's order.
+                meta.sort();
+                for n in plain.into_iter().chain(meta) {
+                    if !cols.iter().any(|c| c.name == n) {
+                        cols.push(OutCol { key: n.clone(), name: n });
                     }
                 }
             }
@@ -4479,6 +4606,118 @@ mod parser_tests {
         assert_eq!(s.items.len(), 2);
         assert_eq!(s.items[0].expr, col(None, "a"));
         assert_eq!(s.from.unwrap().name, "t");
+    }
+
+    /// `AS OF SYSTEM TIME <seq>` hangs on the TABLE, which is what makes the
+    /// query worth having expressible: one relation in the past joined against
+    /// another at the tip.
+    #[test]
+    fn as_of_system_time_is_read_per_table() {
+        let s = parse("SELECT total FROM orders AS OF SYSTEM TIME 42").unwrap();
+        assert_eq!(s.from.clone().unwrap().as_of, Some(42));
+        assert_eq!(s.from.unwrap().alias, None);
+
+        // The alias still follows the temporal qualifier.
+        let s = parse("SELECT o.total FROM orders AS OF SYSTEM TIME 42 o").unwrap();
+        let t = s.from.unwrap();
+        assert_eq!((t.as_of, t.alias.as_deref()), (Some(42), Some("o")));
+
+        // ...and `AS <alias>` is still an alias. `AS` starts both, and the
+        // word after it is the only thing that tells them apart -- without
+        // that lookahead `parse_table_alias` eats `OF` as the alias and leaves
+        // `SYSTEM TIME 42` in the token stream.
+        let t = parse("SELECT x FROM orders AS o").unwrap().from.unwrap();
+        assert_eq!((t.as_of, t.alias.as_deref()), (None, Some("o")));
+
+        // Two relations, one in the past: the shape the per-table placement
+        // exists for.
+        let s = parse(
+            "SELECT o.total, n.total FROM orders AS OF SYSTEM TIME 1 o \
+             JOIN orders n ON o._id = n._id").unwrap();
+        assert_eq!(s.from.unwrap().as_of, Some(1));
+        assert_eq!(s.joins[0].table.as_of, None);
+
+        // A WHERE after the qualifier still parses.
+        let s = parse("SELECT total FROM orders AS OF SYSTEM TIME 7 WHERE _id = '1'").unwrap();
+        assert_eq!(s.from.unwrap().as_of, Some(7));
+        assert!(s.where_.is_some());
+    }
+
+    /// NQL's own verbs, said in SQL. This is what folding NQL into neSQL
+    /// means: the SQL side PARSES them and composes joins and aggregates
+    /// around them, while the NQL engine stays the one implementation that
+    /// executes them.
+    #[test]
+    fn nqls_verbs_are_table_qualifiers_in_sql() {
+        let t = parse("SELECT _id FROM orders SEARCH 'acme'").unwrap().from.unwrap();
+        assert_eq!(t.search.as_deref(), Some("acme"));
+
+        let t = parse("SELECT _id FROM orders VALID AS OF '2026-01-01'").unwrap().from.unwrap();
+        assert_eq!(t.valid_as_of.as_deref(), Some("2026-01-01"));
+
+        // All of them at once, in any order the writer chose, plus an alias.
+        let t = parse(
+            "SELECT o._id FROM orders AS OF SYSTEM TIME 9 VALID AS OF '2026-01-01' \
+             SEARCH 'acme' o").unwrap().from.unwrap();
+        assert_eq!(
+            (t.as_of, t.valid_as_of.as_deref(), t.search.as_deref(), t.alias.as_deref()),
+            (Some(9), Some("2026-01-01"), Some("acme"), Some("o")));
+
+        // Per-table, which is the point: search one relation, join another.
+        let s = parse(
+            "SELECT o._id FROM orders SEARCH 'acme' o JOIN drivers d ON o.driver = d._id")
+            .unwrap();
+        assert_eq!(s.from.unwrap().search.as_deref(), Some("acme"));
+        assert_eq!(s.joins[0].table.search, None);
+    }
+
+    /// The verbs are UNRESERVED, and this is the test that keeps them that way.
+    ///
+    /// Adding a keyword to a grammar breaks every query that already used the
+    /// word as a name. PostgreSQL solves it with `unreserved_keyword`; here the
+    /// equivalent is a lookahead — `VALID` only starts a clause when `AS OF`
+    /// follows, `SEARCH` only when a string does — so somebody's collection
+    /// aliased `search` keeps working after we ship a search verb.
+    #[test]
+    fn the_new_verbs_do_not_steal_names_that_already_worked() {
+        let t = parse("SELECT search.total FROM orders search").unwrap().from.unwrap();
+        assert_eq!((t.alias.as_deref(), t.search.as_deref()), (Some("search"), None));
+
+        let t = parse("SELECT valid.total FROM orders valid").unwrap().from.unwrap();
+        assert_eq!((t.alias.as_deref(), t.valid_as_of.as_deref()), (Some("valid"), None));
+
+        // A COLUMN called `search` or `valid` is untouched either way.
+        assert!(parse("SELECT search, valid FROM orders").is_ok());
+        assert!(parse("SELECT _id FROM orders WHERE search = 'x'").is_ok());
+
+        // And `AS OF` is still not stolen by the alias path.
+        let t = parse("SELECT x FROM orders AS valid").unwrap().from.unwrap();
+        assert_eq!(t.alias.as_deref(), Some("valid"));
+    }
+
+    #[test]
+    fn a_verbs_argument_is_refused_when_it_is_the_wrong_kind_of_thing() {
+        // `VALID AS OF 42` is a sequence where a date belongs. System time and
+        // application-time validity are different questions, so they take
+        // different arguments and the mistake is named rather than coerced.
+        let e = parse("SELECT _id FROM orders VALID AS OF 42").unwrap_err().to_string();
+        assert!(e.contains("date string"), "{}", e);
+    }
+
+    #[test]
+    fn a_wall_clock_as_of_is_refused_with_the_reason() {
+        // NEDB's history is sequence-addressed, so a timestamp would be an
+        // approximation of an exact thing. Same refusal the translator makes,
+        // in the same words, because a client should not learn two answers.
+        for sql in [
+            "SELECT total FROM orders AS OF SYSTEM TIME '2026-01-01'",
+            "SELECT total FROM orders AS OF SYSTEM TIME now()",
+            "SELECT total FROM orders AS OF SYSTEM TIME -1",
+            "SELECT total FROM orders AS OF SYSTEM TIME 1.5",
+        ] {
+            let e = parse(sql).unwrap_err().to_string();
+            assert!(e.contains("sequence number"), "{} -> {}", sql, e);
+        }
     }
 
     #[test]

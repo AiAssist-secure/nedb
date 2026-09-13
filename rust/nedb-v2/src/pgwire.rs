@@ -669,6 +669,16 @@ fn split_output_alias(p: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// One string, in NQL's spelling — double-quoted, inner quotes escaped.
+///
+/// These values arrive already UNQUOTED from the SQL parser, so they cannot be
+/// pasted into an NQL query as-is: a value containing `"` would close the
+/// literal early and the rest of it would be parsed as grammar. Which is the
+/// shape of an injection, not merely a syntax error.
+fn nql_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn sql_literals_to_nql(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -1494,7 +1504,12 @@ fn columns_for(rows: &[Value], project: &[Col]) -> Vec<Col> {
             }
         }
     }
-    plain.sort();
+    // The user's own fields keep the DOCUMENT'S order -- `serde_json`'s
+    // `preserve_order` is on crate-wide precisely so they can, and Postgres
+    // orders `*` by column definition rather than alphabetically. Sorting them
+    // here made `SELECT *` answer in a different column order than the SQL
+    // evaluator did, so a client reading by POSITION got different columns
+    // depending on a deployment flag. Only the provenance block is sorted.
     meta.sort();
     plain.extend(meta);
     plain.into_iter().map(|k| Col::same(&k)).collect()
@@ -3075,13 +3090,44 @@ fn catalog_name(n: &str) -> String {
 /// `current_setting()` and the rest as real functions.
 ///
 /// Cheap: one parse, no execution, no storage access.
+/// Opt-in: route USER-collection `SELECT`s through the SQL evaluator too.
+///
+/// `NEDBD_SQL_ENGINE=1`. Default OFF, and the default is the point — this
+/// changes which engine answers ordinary queries, and the two engines have to
+/// be shown to agree before anyone's production reads move. Flipping it is a
+/// deployment decision, not a build one, so it is read from the environment
+/// once rather than compiled in.
+///
+/// What it unlocks is everything the translator refuses because NQL cannot
+/// express it: joins, subqueries, `EXISTS`, `UNION`/`INTERSECT`/`EXCEPT`,
+/// several named aggregates in one grouped row, `array_agg(x ORDER BY y)`.
+/// What it must not lose is what only the translator has — and a statement the
+/// evaluator's grammar cannot parse (`TRACE`, `SEARCH`, `VALID AS OF`,
+/// `TRAVERSE`, every write) still falls through to the translator on its own,
+/// because `parse` fails and this function is never consulted.
+fn sql_engine_for_collections() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("NEDBD_SQL_ENGINE").as_deref(), Ok("1") | Ok("true") | Ok("on"))
+    })
+}
+
 fn sql_engine_owns(sql: &str) -> bool {
     let Ok(sel) = crate::sqlselect::parse(sql) else { return false };
     let touched = sel.base_relations();
     if touched.is_empty() {
         return translate(sql).is_err();
     }
-    touched.iter().any(|t| crate::pgcatalog::is_catalog(&catalog_name(t)))
+    if touched.iter().any(|t| crate::pgcatalog::is_catalog(&catalog_name(t))) {
+        return true;
+    }
+    // A user collection reaches the evaluator only when asked for. Note the
+    // asymmetry with the line above: a catalogue relation has always been the
+    // evaluator's because the translator cannot serve it at all, whereas a
+    // collection has a working answer on both paths — so the choice between
+    // them is a judgement about parity, not about capability.
+    sql_engine_for_collections()
 }
 
 /// Run a `SELECT` through the full SQL engine when it touches the catalogue.
@@ -3142,6 +3188,100 @@ fn try_catalog_select(
     // A name appearing TWICE (a self-join, `FROM t a JOIN t b`) maps to two
     // different bindings with different predicates, and one scan cannot serve
     // both. Those are dropped rather than guessed at.
+    // `AS OF SYSTEM TIME <seq>`, per relation name.
+    //
+    // The resolver is keyed by NAME, so one collection named twice gets ONE
+    // scan. `FROM orders AS OF 1 o JOIN orders n` asks for that collection at
+    // two different sequences at once, and a single scan cannot serve both.
+    //
+    // This is REFUSED rather than resolved to one of them, and the reason is
+    // worth keeping: the first version dropped the qualifier when a name was
+    // ambiguous — the same "don't guess" instinct that is right for a
+    // pre-filter. It is wrong here. Dropping a pre-filter costs a wasted row;
+    // dropping an AS OF answers a question about the past with data from the
+    // present, and it does it silently. The query `... orders AS OF 1 o JOIN
+    // orders n ...` returned the CURRENT value for both sides and looked fine.
+    let temporal: std::collections::HashMap<String, u64> = {
+        // Gather every sequence each name is read at first, INCLUDING the
+        // absent one, then judge. Deciding as we walk got this wrong: the
+        // first arm of a self-join was judged before it had been recorded, so
+        // a legitimate pair reported the wrong reason.
+        let mut seen: std::collections::HashMap<String, Vec<Option<u64>>> =
+            std::collections::HashMap::new();
+        for t in sel.from.iter().chain(sel.joins.iter().map(|j| &j.table)) {
+            seen.entry(catalog_name(&t.name).to_ascii_lowercase())
+                .or_default()
+                .push(t.as_of);
+        }
+        let mut out: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (key, ats) in &seen {
+            let mut distinct: Vec<Option<u64>> = ats.clone();
+            distinct.sort();
+            distinct.dedup();
+            match distinct.as_slice() {
+                // One sequence for this name, however many times it appears.
+                [Some(seq)] => {
+                    out.insert(key.clone(), *seq);
+                }
+                [None] => {}
+                // More than one. Say WHICH disagreement it is, because the two
+                // read very differently to whoever wrote the query.
+                _ => {
+                    let mixed_tip = distinct.contains(&None);
+                    let seqs: Vec<String> =
+                        distinct.iter().flatten().map(|s| s.to_string()).collect();
+                    let detail = if mixed_tip {
+                        format!(
+                            "at the tip and AS OF {}",
+                            seqs.join(" and "))
+                    } else {
+                        format!("AS OF {}", seqs.join(" and "))
+                    };
+                    return Err(err_msg("0A000", &format!(
+                        "{:?} is read {} in one statement. This endpoint reads each \
+                         collection once per statement, so it cannot serve both — and \
+                         answering from either one would silently return the same rows for \
+                         both arms, which is the comparison failing to be a comparison. Ask \
+                         the two questions separately.",
+                        key, detail)));
+                }
+            }
+        }
+        out
+    };
+
+    // NQL's own verbs, per relation name: `(VALID AS OF, SEARCH)`.
+    //
+    // Same one-scan-per-name constraint as the temporal map, and the same
+    // verdict for the same reason: two different values for one scan is
+    // REFUSED, because silently picking one would answer a different question
+    // than the one asked and look like it worked.
+    let nql_verbs: std::collections::HashMap<String, (Option<String>, Option<String>)> = {
+        let mut out: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+            std::collections::HashMap::new();
+        for t in sel.from.iter().chain(sel.joins.iter().map(|j| &j.table)) {
+            let k = catalog_name(&t.name).to_ascii_lowercase();
+            let e = out.entry(k.clone()).or_default();
+            for (slot, incoming, verb) in [
+                (&mut e.0, &t.valid_as_of, "VALID AS OF"),
+                (&mut e.1, &t.search, "SEARCH"),
+            ] {
+                match (slot.as_deref(), incoming.as_deref()) {
+                    (Some(a), Some(b)) if a != b => {
+                        return Err(err_msg("0A000", &format!(
+                            "{:?} is read with two different {} arguments in one statement \
+                             ({:?} and {:?}). This endpoint reads each collection once, so \
+                             it cannot serve both. Ask the two questions separately.",
+                            k, verb, a, b)));
+                    }
+                    (None, Some(b)) => *slot = Some(b.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        out
+    };
+
     let pushdown_prefilters: std::collections::HashMap<String, String> = {
         let refs: Vec<&crate::sqlselect::TableRef> = sel
             .from
@@ -3169,6 +3309,41 @@ fn try_catalog_select(
 
     let resolve = |name: &str| -> anyhow::Result<Option<Box<dyn crate::sqlselect::Relation>>> {
         let cname = catalog_name(name);
+        // A catalogue relation is SYNTHESISED from the current shape of the
+        // store: it has no log, so it has no history, and there is nothing for
+        // a temporal or full-text qualifier to mean.
+        //
+        // Refused rather than ignored, and the difference is the entire point.
+        // Ignoring `AS OF SYSTEM TIME 0` answers a question about the past with
+        // present-day rows and looks like it worked — and that is exactly what
+        // started happening here the moment the SQL parser learned `AS OF`:
+        // before, the statement failed to parse and fell through to the
+        // translator, which refused it properly. Teaching one layer a clause
+        // silently un-taught another layer's refusal, and a test written long
+        // before this change is what caught it.
+        {
+            let k = cname.to_ascii_lowercase();
+            let bad = if temporal.contains_key(&k) {
+                Some("AS OF SYSTEM TIME")
+            } else {
+                match nql_verbs.get(&k) {
+                    Some((Some(_), _)) => Some("VALID AS OF"),
+                    Some((_, Some(_))) => Some("SEARCH"),
+                    _ => None,
+                }
+            };
+            if let Some(clause) = bad {
+                if crate::pgcatalog::is_catalog(&cname) {
+                    anyhow::bail!(
+                        "{} is not supported on the catalogue relation {:?} — a catalogue is \
+                         synthesised from the store's current shape rather than read from the \
+                         log, so it has no history to reach and no document text to search. \
+                         Ignoring the clause would answer your question with present-day rows \
+                         and look like it worked",
+                        clause, cname);
+                }
+            }
+        }
         if let Some(rows) = crate::pgcatalog::rows(&cname, db) {
             // A synthesised catalogue relation is small and built eagerly;
             // wrapping it satisfies the streaming contract without pretending
@@ -3194,10 +3369,32 @@ fn try_catalog_select(
         // Still eager, and deliberately not claimed otherwise: this narrows
         // WHAT is materialised, not WHETHER it is. A lazy storage scan is the
         // other half and is tracked in HANDOFF.
-        let pre = pushdown_prefilters.get(&cname.to_ascii_lowercase());
-        let nql = match pre {
-            Some(p) => format!("FROM {} WHERE {}", cname, p),
-            None => format!("FROM {}", cname),
+        let key = cname.to_ascii_lowercase();
+        let pre = pushdown_prefilters.get(&key);
+        // Composed in NQL'S OWN CLAUSE ORDER, which its grammar fixes as
+        //
+        //     FROM coll [AS OF seq] [VALID AS OF "date"] [WHERE p] [SEARCH "t"]
+        //
+        // and which is not negotiable: emit `AS OF` after `WHERE` and the NQL
+        // parser reads it as part of the predicate expression. This is the
+        // whole mechanism behind "NQL folded into neSQL" — the SQL side parses
+        // the verbs and composes joins and subqueries around them, while the
+        // NQL engine remains the one implementation that executes them.
+        let nql = {
+            let mut q = format!("FROM {}", cname);
+            if let Some(seq) = temporal.get(&key) {
+                q.push_str(&format!(" AS OF {}", seq));
+            }
+            if let Some(d) = nql_verbs.get(&key).and_then(|v| v.0.as_deref()) {
+                q.push_str(&format!(" VALID AS OF {}", nql_string(d)));
+            }
+            if let Some(p) = pre {
+                q.push_str(&format!(" WHERE {}", p));
+            }
+            if let Some(t) = nql_verbs.get(&key).and_then(|v| v.1.as_deref()) {
+                q.push_str(&format!(" SEARCH {}", nql_string(t)));
+            }
+            q
         };
         match db {
             Some(db) => match crate::nql::query(db, &nql) {
@@ -3208,7 +3405,17 @@ fn try_catalog_select(
                 // returning None here would turn a slow-but-correct query into
                 // "relation does not exist".
                 Err(_) if pre.is_some() => {
-                    match crate::nql::query(db, &format!("FROM {}", cname)) {
+                    // The fallback drops the PRE-FILTER, which is free, and
+                    // must keep the AS OF, which is not: falling back to the
+                    // tip would answer a historical question with current
+                    // data. That is the silent-wrong-answer shape this engine
+                    // keeps getting bitten by, so the sequence travels with
+                    // the retry.
+                    let bare = match temporal.get(&key) {
+                        Some(seq) => format!("FROM {} AS OF {}", cname, seq),
+                        None => format!("FROM {}", cname),
+                    };
+                    match crate::nql::query(db, &bare) {
                         Ok((rows, _)) => Ok(Some(crate::sqlselect::from_vec(rows))),
                         Err(_) => Ok(None),
                     }
