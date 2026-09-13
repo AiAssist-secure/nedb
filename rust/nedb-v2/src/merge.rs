@@ -83,6 +83,18 @@ pub struct PlannedChange {
     pub base: Option<Value>,
     /// The value to write. `None` is a delete.
     pub value: Option<Value>,
+    /// The branch write that causes this replay.
+    ///
+    /// Carried through the plan so `execute` can point the destination node
+    /// back at what caused it. A merge that replayed anonymously could not
+    /// have the edge added later: nothing downstream would know which
+    /// destination write came from which branch write, and the answer is not
+    /// derivable from the values.
+    ///
+    /// PHASE 5B: becomes a qualified `crate::cause::Cause` once the branch
+    /// lives in its own store and a bare hash stops being unambiguous.
+    #[serde(default)]
+    pub source_hash: String,
 }
 
 /// What a merge would do. Produced by [`plan`], consumed by [`execute`].
@@ -175,7 +187,10 @@ pub fn plan(db: &Db, branch_name: &str) -> Result<MergePlan> {
             } else {
                 ChangeKind::Update
             };
-            changes.push(PlannedChange { coll: w.coll, id: w.id, kind, base, value: theirs });
+            changes.push(PlannedChange {
+                coll: w.coll, id: w.id, kind, base, value: theirs,
+                source_hash: w.source_hash,
+            });
             continue;
         }
         if ours == theirs {
@@ -190,7 +205,11 @@ pub fn plan(db: &Db, branch_name: &str) -> Result<MergePlan> {
             (Some(_), Some(_), None) => ConflictKind::BothAdded,
             _ => ConflictKind::BothModified,
         };
-        let c = Conflict { coll: w.coll, id: w.id, base, ours, theirs, kind };
+        let c = Conflict {
+            branch: rec.name.clone(),
+            branch_created_seq: rec.created_seq,
+            coll: w.coll, id: w.id, base, ours, theirs, kind,
+        };
         // A recorded decision about this exact branch-side claim already
         // settled it, and `resolve` already wrote the outcome. Re-reporting it
         // would make `TakeOurs` impossible to ever act on.
@@ -268,7 +287,33 @@ pub fn execute(db: &Db, plan: &MergePlan) -> Result<MergeRecord> {
     for ch in &plan.changes {
         namespace::validate_writable(&ch.coll)?;
         match &ch.value {
-            Some(v) => { db.put(&ch.coll, &ch.id, v.clone(), vec![], None, None)?; }
+            Some(v) => {
+                // The replay points back at the branch write that caused it.
+                // This is the edge the design is built on —
+                //
+                //     branch write  --caused_by-->  new destination write
+                //
+                // and it has to be written now: a destination node created
+                // without it is causally anonymous, and no later pass can
+                // recover which branch write produced it.
+                let cause = if ch.source_hash.is_empty() {
+                    // An overlay record written before source hashes were
+                    // captured. Named rather than silently dropped, because a
+                    // missing causal edge is exactly the thing this field
+                    // exists to prevent and it should not pass unremarked.
+                    eprintln!(
+                        "nedb: merge replay of {}/{} has no source hash — the \
+                         destination node will carry no causal edge to the \
+                         branch write that caused it (overlay record predates \
+                         source-hash capture)",
+                        ch.coll, ch.id
+                    );
+                    vec![]
+                } else {
+                    vec![ch.source_hash.clone()]
+                };
+                db.put(&ch.coll, &ch.id, v.clone(), cause, None, None)?;
+            }
             None => { db.delete(&ch.coll, &ch.id)?; }
         }
         replayed += 1;
@@ -695,6 +740,7 @@ mod tests {
             changes: vec![PlannedChange {
                 coll: namespace::ROOTS.into(), id: "x".into(),
                 kind: ChangeKind::Add, base: None, value: Some(j(1)),
+                source_hash: String::new(),
             }],
             conflicts: vec![],
         };
