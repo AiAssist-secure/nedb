@@ -396,6 +396,23 @@ fn record_branch_write(db: &Db, rec: &BranchRecord, coll: &str, id: &str, value:
     // Written once to get a hash, then rewritten carrying it. A node cannot
     // contain its own hash (the hash is taken over the content), so the source
     // identity is the FIRST node's hash and the stored record points at it.
+    //
+    // PHASE 5B — READ THIS BEFORE TREATING THE PATTERN AS A CONTRACT.
+    //
+    // The second write is an IMPLEMENTATION ARTIFACT of the overlay, not a
+    // semantic event the branch model requires. Nothing about "a branch write
+    // happened" is expressed by there being two nodes; the only reason there
+    // are two is that this substrate persists a node before its hash exists,
+    // so the record cannot name itself on the first pass.
+    //
+    // A real child store hashes the serialized node before committing it:
+    //
+    //     build branch node -> hash it -> commit once -> identity already known
+    //
+    // and the extra version disappears with no change to the branch contract.
+    // Do NOT build anything that depends on a branch write producing two
+    // nodes, and do not optimise this substrate harder than it deserves —
+    // it is scaffolding with a scheduled demolition date.
     let first = db.put_unchecked(
         BRANCH_WRITES, &key, serde_json::to_value(&w)?, vec![], None, None)?;
     let w = BranchWrite { source_hash: first.hash.clone(), ..w };
