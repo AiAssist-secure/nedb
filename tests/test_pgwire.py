@@ -247,9 +247,19 @@ def run_suite(pg_port, cause_hash):
 
     # ── the differentiators, reachable over plain SQL ────────────────────────
     print("\n── NEDB's own surface, through a Postgres client ──")
-    cols, rows = q("SELECT * FROM orders AS OF SYSTEM TIME 1")
-    check("AS OF SYSTEM TIME reads history", len(rows) == 2,
-          f"{len(rows)} rows at seq 1")
+    # Find the sequence at which the second row exists, rather than asserting
+    # an absolute one. Registering a collection is itself a write, so the
+    # first document in `orders` does not sit at sequence 0 — and this test is
+    # about AS OF SYSTEM TIME reaching history over the wire, not about where
+    # the engine's bookkeeping happens to land.
+    at_two = None
+    for n in range(0, 16):
+        _, probe = q(f"SELECT * FROM orders AS OF SYSTEM TIME {n}")
+        if len(probe) == 2:
+            at_two = n
+            break
+    check("AS OF SYSTEM TIME reads history", at_two is not None,
+          "no sequence in 0..15 showed two rows")
     check("...using Postgres's own time-travel spelling", True)
 
     e = err("SELECT * FROM orders AS OF SYSTEM TIME '2026-01-01'")

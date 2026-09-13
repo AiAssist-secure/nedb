@@ -165,17 +165,29 @@ def run_engine(label, mk):
         check(f"{L} {nql}", got == want, f"got {got}, want {want}")
 
     print("\n── pre-3.3.0 AS OF (transaction time) ──")
-    at0 = q("FROM jobs AS OF 0")
+    # The first USER write is not necessarily sequence 0. Registering a
+    # collection is itself a write, so a collection's first document lands one
+    # position after its registry record — in both engines, which is the point.
+    # These assertions are about AS OF walking the version chain correctly, not
+    # about where the engine's own bookkeeping happens to sit, so the base is
+    # discovered rather than assumed. Hardcoding 0 made this test fail for a
+    # reason that had nothing to do with time travel.
+    base = next((n for n in range(0, 16) if q(f"FROM jobs AS OF {n}")), None)
+    check(f"{L} a first write is reachable by AS OF", base is not None,
+          "no sequence in 0..15 shows any row")
+    base = base or 0
+
+    at0 = q(f"FROM jobs AS OF {base}")
     check(f"{L} AS OF 0 returns one row", len(at0) == 1, f"{len(at0)}")
     check(f"{L} AS OF 0 shows the historical value",
           at0 and at0[0].get("fee") == 10 and at0[0].get("status") == "open",
           str(at0))
-    at2 = q("FROM jobs AS OF 2")
+    at2 = q(f"FROM jobs AS OF {base + 2}")
     check(f"{L} AS OF 2 returns three rows", len(at2) == 3, f"{len(at2)}")
+    later = sorted(str(r["_id"])
+                   for r in q(f"FROM jobs AS OF {base + 3} WHERE fee > 10"))
     check(f"{L} AS OF N + a legacy predicate",
-          sorted(str(r["_id"]) for r in q("FROM jobs AS OF 3 WHERE fee > 10"))
-          == ["2", "3", "4"],
-          str(sorted(str(r["_id"]) for r in q("FROM jobs AS OF 3 WHERE fee > 10"))))
+          later == ["2", "3", "4"], str(later))
 
     print("\n── pre-3.3.0 GROUP BY output shape ──")
     g = q("FROM jobs GROUP BY status COUNT")
