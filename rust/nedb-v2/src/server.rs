@@ -298,7 +298,7 @@ async fn list_databases(State(mgr): State<Manager>, headers: HeaderMap) -> Respo
         names.iter().map(|n| {
             if let Some(db) = inner.dbs.get(n) {
                 let (seq, head) = db_seq_head(db);
-                json!({"name": n, "seq": seq, "head": head, "collections": db.id_index.collections()})
+                json!({"name": n, "seq": seq, "head": head, "collections": db.collections()})
             } else {
                 json!({"name": n})
             }
@@ -336,7 +336,7 @@ async fn get_database(
         None => err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
         Some(db) => {
             let (seq, head) = db_seq_head(&db);
-            ok(json!({"name": name, "seq": seq, "head": head, "collections": db.id_index.collections()}))
+            ok(json!({"name": name, "seq": seq, "head": head, "collections": db.collections()}))
         }
     }
 }
@@ -405,7 +405,7 @@ async fn cast_prompt(
 
     // The engine knows the real schema, so constrain against it. This is the
     // whole reason the planner lives here instead of in a client.
-    let collections = db.id_index.collections();
+    let collections = db.collections();
     let result = caster.cast_checked(&body.prompt, &collections);
 
     // Validate by PARSING, not by pattern-matching the text. The parser is the

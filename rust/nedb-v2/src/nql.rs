@@ -2318,11 +2318,35 @@ mod tests {
     #[test]
     fn metadata_fields_are_filterable() {
         let (_tmp, db) = setup();
-        // _seq is 0-indexed — the first put lands at seq 0, so `> 0` drops it.
         let (rows, _) = query(&db, "FROM blocks WHERE _seq >= 0 AND _coll = blocks").unwrap();
         assert_eq!(rows.len(), 5);
-        let (tail, _) = query(&db, "FROM blocks WHERE _seq > 0").unwrap();
+
+        // Cut above the FIRST row's seq rather than above a hardcoded 0. The
+        // absolute value moved when collection registration became a real
+        // write (seq 0 is now the `_nedb.collections` record), and a test that
+        // pins absolute sequence numbers is testing the write order of the
+        // engine's bookkeeping, not whether `_seq` is filterable.
+        let first = rows.iter()
+            .filter_map(|r| r.get("_seq").and_then(|v| v.as_u64()))
+            .min()
+            .expect("five rows carrying _seq");
+        let (tail, _) = query(&db, &format!("FROM blocks WHERE _seq > {}", first)).unwrap();
         assert_eq!(tail.len(), 4);
+    }
+
+    /// The engine's own bookkeeping is not part of anybody's query results.
+    #[test]
+    fn a_reserved_collection_never_leaks_into_a_user_query() {
+        let (_tmp, db) = setup();
+        let (rows, _) = query(&db, "FROM blocks").unwrap();
+        assert!(
+            rows.iter().all(|r| r.get("_coll").and_then(|v| v.as_str()) == Some("blocks")),
+            "a query for one collection returned rows from another"
+        );
+        assert!(
+            !db.collections().iter().any(|c| crate::namespace::is_reserved(c)),
+            "the registry is not a user collection"
+        );
     }
 
     #[test]

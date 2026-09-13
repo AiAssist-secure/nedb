@@ -198,7 +198,7 @@ fn cmd_export(rest: &[String]) -> i32 {
     let db = open(need_path(rest));
     let colls: Vec<String> = match rest.get(1) {
         Some(c) => vec![c.clone()],
-        None => db.id_index.collections(),
+        None => db.collections(),
     };
     let mut total = 0usize;
     for coll in &colls {

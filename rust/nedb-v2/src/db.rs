@@ -154,6 +154,15 @@ pub struct Db {
     /// and the cold-scan background pass. Only covers nodes from the current
     /// process session + cold-scan; older seqs not in this map cannot be resolved.
     seq_index:          Arc<DashMap<u64, String>>,
+    /// Collections already known to be registered, so the common case — every
+    /// write after a collection's first — costs one lock-free map hit instead of
+    /// an index lookup.
+    ///
+    /// A CACHE, never the answer. `collections()` reads the registry in the DAG.
+    /// A stale or empty cache can only cause a redundant registry check, never a
+    /// wrong namespace, which is the asymmetry that makes it safe to keep it
+    /// this simple.
+    known_collections:  Arc<DashMap<String, ()>>,
 }
 
 impl Db {
@@ -176,6 +185,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(true)),  // always ready
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            known_collections: Arc::new(DashMap::new()),
         }
     }
 
@@ -241,6 +251,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(false)),
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            known_collections: Arc::new(DashMap::new()),
         };
 
         // Auto-migrate v1 → v2 if needed (pass DEK so encrypted AOFs convert correctly)
@@ -420,7 +431,33 @@ impl Db {
     }
 
     /// Write a document. Returns the new node with its content hash set.
+    ///
+    /// Refuses an unusable or engine-owned collection name, and registers the
+    /// collection if this is its first write — so that "this collection exists"
+    /// becomes a durable fact at the moment it becomes true, rather than an
+    /// inference drawn later from whatever the storage layer happens to have
+    /// lying around.
     pub fn put(
+        &self,
+        coll: &str,
+        id: &str,
+        data: Value,
+        caused_by: Vec<String>,
+        valid_from: Option<String>,
+        valid_to:   Option<String>,
+    ) -> Result<Node> {
+        crate::namespace::validate_writable(coll)?;
+        self.ensure_collection(coll)?;
+        self.put_unchecked(coll, id, data, caused_by, valid_from, valid_to)
+    }
+
+    /// The write itself, with no namespace policy applied.
+    ///
+    /// Exists so the engine can write its own reserved records through exactly
+    /// the same path user data takes — same object store, same version chain,
+    /// same Merkle head. A registry that was written by a side channel would be
+    /// a registry `verify()` does not cover.
+    pub(crate) fn put_unchecked(
         &self,
         coll: &str,
         id: &str,
@@ -491,6 +528,122 @@ impl Db {
         Ok(node)
     }
 
+    // ── Collection registry ───────────────────────────────────────────────
+    //
+    // See `crate::namespace` for why a collection's existence has to be a
+    // recorded event rather than an inference from storage.
+
+    /// Record that a collection exists, if that is not already recorded.
+    ///
+    /// Idempotent, and cheap after the first write to a given collection: a
+    /// `DashMap` hit. On a miss it consults the registry itself before writing,
+    /// so reopening a database does not re-register everything in it.
+    pub(crate) fn ensure_collection(&self, coll: &str) -> Result<()> {
+        if self.known_collections.contains_key(coll) {
+            return Ok(());
+        }
+        if let Some(rec) = self.get(crate::namespace::COLLECTIONS, coll) {
+            // Already registered. Revive it if it was dropped and is being
+            // written to again — a write is an unambiguous assertion that the
+            // caller means for this collection to exist.
+            if rec.data.get("dropped").and_then(|v| v.as_bool()).unwrap_or(false) {
+                self.write_collection_record(coll, false)?;
+            }
+            self.known_collections.insert(coll.to_string(), ());
+            return Ok(());
+        }
+        self.write_collection_record(coll, false)?;
+        self.known_collections.insert(coll.to_string(), ());
+        Ok(())
+    }
+
+    /// Append a registry record. Creation and drop are the same shape, because
+    /// they are the same kind of event: an assertion, at a sequence, about
+    /// whether a name is currently live. The `prev` chain makes the history of
+    /// that name walkable by exactly the machinery that walks every other
+    /// document's history.
+    fn write_collection_record(&self, coll: &str, dropped: bool) -> Result<()> {
+        let seq = self.seq.load(Ordering::SeqCst);
+        self.put_unchecked(
+            crate::namespace::COLLECTIONS,
+            coll,
+            serde_json::json!({ "name": coll, "dropped": dropped, "at_seq": seq }),
+            vec![], None, None,
+        )?;
+        Ok(())
+    }
+
+    /// Every collection that currently exists.
+    ///
+    /// THE authoritative answer, and the one a state root must commit to.
+    /// Invariant across storage backends and independent of flush timing,
+    /// because it reads recorded events rather than directory entries.
+    ///
+    /// An empty-but-created collection is present here. That is the whole
+    /// point: a database where `orders` was created and then emptied is not the
+    /// same database as one where `orders` never existed, and a root that
+    /// cannot tell them apart is not committing to the namespace.
+    pub fn collections(&self) -> Vec<String> {
+        let mut live: Vec<String> = self.id_index
+            .list_ids(crate::namespace::COLLECTIONS)
+            .into_iter()
+            .filter(|name| {
+                self.get(crate::namespace::COLLECTIONS, name)
+                    .map(|rec| !rec.data.get("dropped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Which collections existed as of a sequence. The namespace is versioned
+    /// for free, because the registry is ordinary documents in the DAG.
+    pub fn collections_as_of(&self, target_seq: u64) -> Vec<String> {
+        let mut live: Vec<String> = self
+            .list_ids_including_deleted(crate::namespace::COLLECTIONS)
+            .into_iter()
+            .filter(|name| {
+                self.get_as_of(crate::namespace::COLLECTIONS, name, target_seq)
+                    .map(|rec| !rec.data.get("dropped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Drop a collection: record that the name is no longer live.
+    ///
+    /// A TOMBSTONE, not an erasure — the same contract `delete` already has for
+    /// documents. The registry keeps the name, marked dropped, so `AS OF`
+    /// before the drop still reports the collection as having existed, and a
+    /// later root can distinguish "dropped" from "never created".
+    ///
+    /// Documents are left where they are. Reclaiming them is `compact`'s job
+    /// and an operator's explicit decision; quietly destroying history behind a
+    /// namespace operation is exactly the behaviour the engine refuses to have.
+    ///
+    /// Returns false when the collection was not live to begin with.
+    pub fn drop_collection(&self, coll: &str) -> Result<bool> {
+        crate::namespace::validate_writable(coll)?;
+        let live = self.get(crate::namespace::COLLECTIONS, coll)
+            .map(|rec| !rec.data.get("dropped")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+            .unwrap_or(false);
+        if !live {
+            return Ok(false);
+        }
+        self.write_collection_record(coll, true)?;
+        self.known_collections.remove(coll);
+        Ok(true)
+    }
+
     /// Batch put: write N documents in parallel, preserving monotonic seq ordering.
     /// Pre-allocates N seq numbers atomically, then parallelises object writes and
     /// id-index updates via Rayon. Each op is independent — safe to parallelise.
@@ -503,6 +656,21 @@ impl Db {
         use rayon::prelude::*;
 
         if ops.is_empty() { return Ok(vec![]); }
+
+        // Validate and register EVERY collection before allocating a single
+        // seq. A batch that is going to be refused must be refused before it
+        // has written anything, and registration consumes seqs of its own — so
+        // it cannot happen inside the block that assumes N consecutive ones.
+        for (coll, ..) in ops.iter() {
+            crate::namespace::validate_writable(coll)?;
+        }
+        for coll in ops.iter()
+            .map(|(c, ..)| c.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            self.ensure_collection(coll)?;
+        }
+
         let n = ops.len() as u64;
 
         // Pre-allocate N consecutive seq numbers — preserves ordering under concurrency
@@ -863,6 +1031,7 @@ impl Db {
     /// Delete a document — writes a tombstone node and removes the id from the index.
     /// The object history is preserved in the DAG; only the live id pointer is cleared.
     pub fn delete(&self, coll: &str, id: &str) -> Result<bool> {
+        crate::namespace::validate_writable(coll)?;
         let prev = match self.id_index.get(coll, id) {
             None => return Ok(false),   // already gone
             Some(h) => h,
@@ -1669,15 +1838,17 @@ mod tests_v2 {
         let dir = tempdir().unwrap();
         let db = Db::open(dir.path(), None).unwrap();
         db.put("orders", "a", serde_json::json!({"t": 1}), vec![], None, None).unwrap();
-        // A surviving sibling, so the collection is still live after the
-        // delete. (With `a` alone, `orders` would have no index entries left
-        // and so no directory to enumerate — existing behaviour, unrelated to
-        // the graveyard, but it would make this test assert the wrong thing.)
+        // A surviving sibling. This used to be load-bearing: with `a` alone,
+        // `orders` had no index entries left and so no directory to enumerate,
+        // and the test would have asserted the wrong thing for a reason that
+        // had nothing to do with the graveyard. The collection registry fixed
+        // that — an emptied collection stays in the namespace — so the sibling
+        // is now just a second row.
         db.put("orders", "b", serde_json::json!({"t": 2}), vec![], None, None).unwrap();
         db.delete("orders", "a").unwrap();
         db.try_flush_all().unwrap();
 
-        let colls = db.id_index.collections();
+        let colls = db.collections();
         assert!(!colls.iter().any(|c| c == "graveyard"),
                 "the graveyard must not look like a collection: {:?}", colls);
         assert_eq!(colls, vec!["orders".to_string()]);
@@ -1899,7 +2070,11 @@ mod tests_v2 {
             assert!(ok > 0 && bad.is_empty(), "objects must still be intact and verifying");
 
             let written = db.repair().unwrap();
-            assert_eq!(written, 25, "one entry per distinct (coll, id)");
+            // 25 rows plus the one `_nedb.collections` record that registered
+            // the collection. The registry is written through the ordinary
+            // object path precisely so that repair, verify and replication
+            // cover it without knowing it is special.
+            assert_eq!(written, 26, "one entry per distinct (coll, id)");
             assert_eq!(db.list("rows").len(), 25, "every row must come back");
 
             // The winner for a re-put id is the HIGHEST seq, matching put().
@@ -1961,15 +2136,19 @@ mod tests_v2 {
         assert!(!drained.has_more, "genuinely caught up reports has_more=false");
 
         // KNOWN SHARP EDGE, pinned here deliberately: the cursor is EXCLUSIVE
-        // and seqs start at 0, so `since(0, _)` returns (0, head] and the very
-        // first write in a database (seq 0) is not reachable through any cursor
-        // value. 10 writes therefore drain as 9 records. Changing the cursor
-        // convention would break existing replication consumers, so this is
-        // documented rather than silently altered — but a replica seeded from
-        // since() alone starts one record short.
+        // and seqs start at 0, so `since(0, _)` returns (0, head] and whatever
+        // holds seq 0 is not reachable through any cursor value. Changing the
+        // cursor convention would break existing replication consumers, so this
+        // is documented rather than silently altered.
+        //
+        // The collection registry softened it by accident and in the right
+        // direction: seq 0 is now the `_nedb.collections` record rather than a
+        // user's first row, so all 10 writes drain. A replica seeded from
+        // since() alone is still one record short — but the record it misses is
+        // one it can re-derive, instead of somebody's data.
         assert_eq!(
             drained.nodes.len(),
-            9,
+            10,
             "since(0) is exclusive of seq 0 — see the sharp edge noted above"
         );
         assert!(
@@ -2083,7 +2262,8 @@ mod tests_v2 {
         }
 
         let status = db.scan_status();
-        assert_eq!(status.indexed_count, n as usize, "every written object must be indexed");
+        // n rows + the collection registry record for "things".
+        assert_eq!(status.indexed_count, n as usize + 1, "every written object must be indexed");
         assert!(status.scan_complete);
 
         let tip = db.tip().expect("tip resolves after cold scan");
@@ -2118,17 +2298,19 @@ mod tests_v2 {
             for h in handles { h.join().unwrap(); }
             // In-session: tip must be the highest assigned seq.
             let expected = db.seq.load(std::sync::atomic::Ordering::SeqCst) - 1;
-            assert_eq!(expected, total - 1, "exactly {} writes expected", total);
+            // `total` user writes plus one registry record for collection "c",
+            // so the highest assigned seq is `total`, not `total - 1`.
+            assert_eq!(expected, total, "exactly {} writes expected", total);
             assert_eq!(db.tip().expect("in-session tip").seq, expected);
             db.flush_all(); // persist MANIFEST incl. tip_hash
         }
         // Warm reopen: seq_index cold; tip() resolves via MANIFEST tip_hash.
         let db2 = Db::open(dir.path(), None).unwrap();
         let tip = db2.tip().expect("tip must survive warm restart after concurrent writes");
-        assert_eq!(tip.seq, total - 1, "warm-boot tip must be the highest-seq write");
+        assert_eq!(tip.seq, total, "warm-boot tip must be the highest-seq write");
         // Per-collection tip: same contract.
         let ct = db2.tip_collection("c").expect("coll tip survives");
-        assert_eq!(ct.seq, total - 1);
+        assert_eq!(ct.seq, total);
     }
 
     /// Pre-2.5.43 MANIFESTs (no tip_hash) must warm-boot, NOT force a cold
@@ -2284,5 +2466,219 @@ mod tests_v2 {
                     "the Db outlived its last owner — the ticker is leaking it");
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+}
+
+/// Collection identity: does the database know which collections exist,
+/// independently of how and when it happened to store them?
+///
+/// The three tests that used to fail are the first three here. They failed
+/// like this, on the running engine:
+///
+/// ```text
+/// disk, flush between   : ["orders"]
+/// disk, one tick        : []
+/// memory                : []
+/// ```
+#[cfg(test)]
+mod collection_identity {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn j(v: u64) -> serde_json::Value { serde_json::json!({"v": v}) }
+
+    /// Create a collection, then empty it — flushing BETWEEN the two.
+    fn disk_emptied_with_flush_between() -> Vec<String> {
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.flush_all();
+        db.delete("orders", "1").unwrap();
+        db.flush_all();
+        db.collections()
+    }
+
+    /// The same logical history, with no flush in between. Before the registry
+    /// this returned `[]`, because the WAL buffer is keyed by `(coll, id)` and
+    /// the tombstone overwrote the PUT before any directory was created.
+    fn disk_emptied_within_one_tick() -> Vec<String> {
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        db.flush_all();
+        db.collections()
+    }
+
+    fn memory_emptied() -> Vec<String> {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        db.collections()
+    }
+
+    /// A background timer is not a fact about the data.
+    #[test]
+    fn the_same_history_yields_the_same_namespace_regardless_of_flush_timing() {
+        assert_eq!(
+            disk_emptied_with_flush_between(),
+            disk_emptied_within_one_tick(),
+            "a 1-second flush ticker decided the namespace"
+        );
+    }
+
+    /// A root computed on a disk replica and on a memory replica of the same
+    /// database has to be the same root.
+    #[test]
+    fn the_namespace_does_not_depend_on_the_storage_backend() {
+        assert_eq!(
+            disk_emptied_with_flush_between(),
+            memory_emptied(),
+            "disk and memory disagree about which collections exist"
+        );
+    }
+
+    /// The property the Oracle named: an empty-but-durable collection must not
+    /// be indistinguishable from one that never existed.
+    #[test]
+    fn an_emptied_collection_is_not_the_same_as_one_that_never_existed() {
+        assert_eq!(memory_emptied(), vec!["orders".to_string()]);
+
+        let never = Db::in_memory();
+        assert!(never.collections().is_empty());
+    }
+
+    #[test]
+    fn a_dropped_collection_is_gone_but_a_merely_empty_one_is_not() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()], "emptying is not dropping");
+
+        assert!(db.drop_collection("orders").unwrap());
+        assert!(db.collections().is_empty());
+
+        // Dropping twice is not an error, it is just not a second event.
+        assert!(!db.drop_collection("orders").unwrap());
+    }
+
+    #[test]
+    fn writing_to_a_dropped_collection_revives_it() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.drop_collection("orders").unwrap();
+        assert!(db.collections().is_empty());
+
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+    }
+
+    /// The namespace is versioned, because the registry is ordinary documents.
+    #[test]
+    fn the_namespace_can_be_read_as_of_a_sequence() {
+        let db = Db::in_memory();
+        let a = db.put("alpha", "1", j(1), vec![], None, None).unwrap();
+        let b = db.put("beta", "1", j(1), vec![], None, None).unwrap();
+
+        assert_eq!(db.collections_as_of(a.seq), vec!["alpha".to_string()]);
+        assert_eq!(
+            db.collections_as_of(b.seq),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_drop_is_visible_as_a_drop_in_history_not_as_an_absence() {
+        let db = Db::in_memory();
+        let a = db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.drop_collection("orders").unwrap();
+
+        assert!(db.collections().is_empty(), "not live now");
+        assert_eq!(
+            db.collections_as_of(a.seq), vec!["orders".to_string()],
+            "but it existed then, and history says so"
+        );
+    }
+
+    #[test]
+    fn the_registry_does_not_list_itself() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+        assert!(
+            !db.collections().iter().any(|c| crate::namespace::is_reserved(c)),
+            "an engine-owned collection is not part of the user's namespace"
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_write_to_the_registry() {
+        let db = Db::in_memory();
+        assert!(db.put(crate::namespace::COLLECTIONS, "forged", j(1), vec![], None, None).is_err());
+        assert!(db.put("_nedb.anything", "x", j(1), vec![], None, None).is_err());
+        assert!(db.delete(crate::namespace::COLLECTIONS, "orders").is_err());
+        assert!(db.drop_collection(crate::namespace::COLLECTIONS).is_err());
+    }
+
+    #[test]
+    fn a_collection_name_cannot_escape_the_data_directory() {
+        let db = Db::in_memory();
+        for escape in ["../etc", "a/b", "..", ""] {
+            assert!(
+                db.put(escape, "x", j(1), vec![], None, None).is_err(),
+                "{:?} must not be usable as a collection name", escape
+            );
+        }
+    }
+
+    #[test]
+    fn registration_survives_a_reopen_without_re_registering() {
+        let dir = tempdir().unwrap();
+        let seq_after_first_open;
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            db.put("orders", "2", j(2), vec![], None, None).unwrap();
+            db.flush_all();
+            seq_after_first_open = db.seq.load(Ordering::SeqCst);
+        }
+        let db = Db::open(dir.path(), None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+        db.put("orders", "3", j(3), vec![], None, None).unwrap();
+        assert_eq!(
+            db.seq.load(Ordering::SeqCst), seq_after_first_open + 1,
+            "reopening and writing again must not append a second registry record"
+        );
+    }
+
+    #[test]
+    fn a_batch_registers_every_collection_it_touches_exactly_once() {
+        let db = Db::in_memory();
+        db.put_batch(vec![
+            ("a".into(), "1".into(), j(1), vec![], None, None),
+            ("b".into(), "1".into(), j(1), vec![], None, None),
+            ("a".into(), "2".into(), j(2), vec![], None, None),
+        ]).unwrap();
+        assert_eq!(db.collections(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            db.id_index.list_ids(crate::namespace::COLLECTIONS).len(), 2,
+            "three writes across two collections is two registry records"
+        );
+    }
+
+    #[test]
+    fn a_batch_naming_a_reserved_collection_writes_nothing_at_all() {
+        let db = Db::in_memory();
+        let before = db.seq.load(Ordering::SeqCst);
+        let r = db.put_batch(vec![
+            ("ok".into(), "1".into(), j(1), vec![], None, None),
+            (crate::namespace::COLLECTIONS.into(), "forged".into(), j(1), vec![], None, None),
+        ]);
+        assert!(r.is_err(), "a batch with a refused collection must be refused");
+        assert_eq!(
+            db.seq.load(Ordering::SeqCst), before,
+            "and must not have written the acceptable half of itself first"
+        );
+        assert!(db.collections().is_empty());
     }
 }
