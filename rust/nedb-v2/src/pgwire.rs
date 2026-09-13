@@ -3583,6 +3583,68 @@ impl Executed {
 /// Every SQL→NEDB decision lives here, which is the point: the extended query
 /// protocol added below is then purely a matter of message framing, and cannot
 /// drift from the simple path's semantics.
+/// Run one neQL statement against a database, in process.
+///
+/// # Why this exists
+///
+/// Until this, the engine had exactly one SQL execution path and it was welded
+/// to the wire protocol: `execute_stmt` is private, takes the connection's
+/// read-only flag, and reports failure as ALREADY-ENCODED Postgres error bytes.
+/// Nothing outside a pgwire session could run SQL against a `Db`.
+///
+/// That was survivable while the only SQL client was a socket. It stopped being
+/// survivable when neSQL — which owns the language — needed to run the language
+/// from a CLI, because the alternatives were a CLI that opens a TCP connection
+/// to its own process, or a second SQL front end living in the CLI. The second
+/// one is worse than it sounds: it makes the CLI a quieter second authority on
+/// what the language accepts, and the first divergence between them would be
+/// discovered by a user, not by us.
+///
+/// So the path the wire already takes is exposed, with the error decoded into
+/// text. Same parser, same translator, same evaluator, same decision about
+/// which engine runs a statement — one authority.
+pub fn execute_sql(db: &Arc<Db>, sql: &str, read_only: bool)
+    -> std::result::Result<Executed, String>
+{
+    execute_stmt(sql, "", Some(db), read_only).map_err(|wire| decode_wire_error(&wire))
+}
+
+/// Pull the human-readable message out of an encoded ErrorResponse.
+///
+/// The wire format is a sequence of NUL-terminated `field-code || text` runs
+/// terminated by an empty field. `M` is the primary message and `C` the
+/// SQLSTATE; both are reported, because a caller who loses the SQLSTATE loses
+/// the only machine-stable part of the error.
+fn decode_wire_error(buf: &[u8]) -> String {
+    let mut code: Option<String> = None;
+    let mut msg: Option<String> = None;
+    // Skip the 1-byte tag and 4-byte length when they are present.
+    let body = if buf.len() > 5 { &buf[5..] } else { buf };
+    let mut i = 0usize;
+    while i < body.len() && body[i] != 0 {
+        let field = body[i];
+        i += 1;
+        let start = i;
+        while i < body.len() && body[i] != 0 { i += 1; }
+        let text = String::from_utf8_lossy(&body[start..i]).into_owned();
+        i += 1; // the NUL
+        match field {
+            b'C' => code = Some(text),
+            b'M' => msg = Some(text),
+            _ => {}
+        }
+    }
+    match (code, msg) {
+        (Some(c), Some(m)) => format!("{} ({})", m, c),
+        (None, Some(m)) => m,
+        // Never silently produce an empty error. A failure we cannot read is
+        // still a failure, and saying so beats returning "".
+        _ => format!(
+            "the engine refused the statement and the error could not be decoded              ({} bytes of wire response)", buf.len()
+        ),
+    }
+}
+
 fn execute_stmt(
     stmt_sql: &str,
     db_name: &str,

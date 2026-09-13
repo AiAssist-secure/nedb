@@ -861,6 +861,96 @@ async fn verify_database(
     }))
 }
 
+// ── State roots over HTTP ─────────────────────────────────────────────────
+//
+// The root surface is exposed because the thing a root is FOR is comparing two
+// databases, and the two databases are usually on two machines. A root you can
+// only compute locally answers a question nobody was asking.
+
+async fn root_current(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    match db.state_root() {
+        Ok(r) => ok(serde_json::to_value(r).unwrap_or(json!({}))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+async fn root_list(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    ok(json!({
+        "roots": db.list_roots(),
+        "history_floor": db.history_floor(),
+    }))
+}
+
+async fn root_create(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+    AxQuery(q): AxQuery<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    // `at` is explicit on purpose: a root at the tip is O(live state), a root
+    // in the past also walks a version chain per document. Backfill is not
+    // hidden behind the cheap call.
+    let at: Option<u64> = match q.get("at").map(|v| v.parse::<u64>()) {
+        None => None,
+        Some(Ok(v)) => Some(v),
+        Some(Err(_)) => return err(StatusCode::BAD_REQUEST, "at must be a sequence number"),
+    };
+    let made = match at {
+        Some(seq) => db.create_root_at(seq),
+        None => db.create_root(),
+    };
+    match made {
+        Ok(r) => ok(serde_json::to_value(r).unwrap_or(json!({}))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+async fn root_verify(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath((name, seq)): AxPath<(String, u64)>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    let v = db.verify_root(seq);
+    // Deliberately 200 for every outcome including a mismatch. The three states
+    // -- verified, mismatched, unverifiable -- are the PAYLOAD, and collapsing
+    // them onto HTTP status codes would re-flatten exactly the distinction the
+    // verification exists to preserve.
+    ok(json!({
+        "verified":   v.is_verified(),
+        "mismatch":   v.is_mismatch(),
+        "exit_code":  v.exit_code(),
+        "result":     v,
+    }))
+}
+
 async fn checkpoint(
     State(mgr): State<Manager>,
     headers: HeaderMap,
@@ -1089,6 +1179,9 @@ pub fn router(mgr: Manager) -> Router {
         .route("/v1/databases/:name/batch",                      post(batch_operations))
         .route("/v1/databases/:name/index",                      post(create_index))
         .route("/v1/databases/:name/verify",                     get(verify_database))
+        .route("/v1/databases/:name/root",                       get(root_current).post(root_create))
+        .route("/v1/databases/:name/roots",                      get(root_list))
+        .route("/v1/databases/:name/roots/:seq/verify",          get(root_verify))
         .route("/v1/databases/:name/checkpoint",                 post(checkpoint))
         .route("/v1/databases/:name/log",                        get(get_log))
         .route("/v1/databases/:name/tip",                        get(tip_database))

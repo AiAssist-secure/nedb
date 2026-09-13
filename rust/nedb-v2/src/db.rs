@@ -539,22 +539,46 @@ impl Db {
     /// `DashMap` hit. On a miss it consults the registry itself before writing,
     /// so reopening a database does not re-register everything in it.
     pub(crate) fn ensure_collection(&self, coll: &str) -> Result<()> {
+        // Fast path: already known, no locking at all. This is every write
+        // after a collection's first.
         if self.known_collections.contains_key(coll) {
             return Ok(());
         }
-        if let Some(rec) = self.get(crate::namespace::COLLECTIONS, coll) {
-            // Already registered. Revive it if it was dropped and is being
-            // written to again — a write is an unambiguous assertion that the
-            // caller means for this collection to exist.
-            if rec.data.get("dropped").and_then(|v| v.as_bool()).unwrap_or(false) {
-                self.write_collection_record(coll, false)?;
+
+        // Slow path, taken once per collection per process. The entry lock is
+        // held across the registry write ON PURPOSE: registration has to be
+        // exactly-once, and a check-then-write without it is a race that N
+        // concurrent first-writers all win.
+        //
+        // That race was not hypothetical. Four threads writing into a fresh
+        // collection each saw it as unregistered and each appended a registry
+        // record — harmless to the ANSWER (same id, the version chain just
+        // grows) but four seqs and four nodes spent on one fact, and on a
+        // wide parallel ingest it would be one per writer. A concurrency test
+        // asserting exact sequence counts is what caught it.
+        //
+        // Holding a shard lock across I/O is safe here because nothing in the
+        // write path touches `known_collections`, so there is no path back
+        // into this map to deadlock against.
+        use dashmap::mapref::entry::Entry;
+        match self.known_collections.entry(coll.to_string()) {
+            Entry::Occupied(_) => Ok(()),
+            Entry::Vacant(slot) => {
+                if let Some(rec) = self.get(crate::namespace::COLLECTIONS, coll) {
+                    // Registered in a previous process. Revive it if it was
+                    // dropped and is being written to again — a write is an
+                    // unambiguous assertion that the caller means for this
+                    // collection to exist.
+                    if rec.data.get("dropped").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        self.write_collection_record(coll, false)?;
+                    }
+                } else {
+                    self.write_collection_record(coll, false)?;
+                }
+                slot.insert(());
+                Ok(())
             }
-            self.known_collections.insert(coll.to_string(), ());
-            return Ok(());
         }
-        self.write_collection_record(coll, false)?;
-        self.known_collections.insert(coll.to_string(), ());
-        Ok(())
     }
 
     /// Append a registry record. Creation and drop are the same shape, because
@@ -840,7 +864,36 @@ impl Db {
             .unwrap_or(0)
     }
 
-    fn set_history_floor(&self, floor: u64) -> Result<()> {
+    /// Declare where reconstructable history begins.
+    ///
+    /// Public because pruning is not only something `compact` does: an
+    /// operator who restores from a trimmed backup, or ships a database with
+    /// its early segments removed, has pruned history that the engine has no
+    /// way to notice. Without a way to say so, every historical root in that
+    /// database would fail verification as if it had been tampered with.
+    ///
+    /// MONOTONIC. The floor may rise and may never fall, because lowering it
+    /// asserts that history exists which demonstrably does not — and the first
+    /// thing that assertion does is turn an honest "unavailable" into a
+    /// confident, wrong "mismatch".
+    pub fn set_history_floor(&self, floor: u64) -> Result<()> {
+        let current = self.history_floor();
+        if floor < current {
+            anyhow::bail!(
+                "refusing to lower the history floor from {} to {}: the floor records \
+                 what was DISCARDED, and material does not come back. Lowering it would \
+                 make the engine attempt recomputations it cannot perform and report the \
+                 failures as mismatches.",
+                current, floor
+            );
+        }
+        if floor == current {
+            return Ok(());
+        }
+        self.write_history_floor(floor)
+    }
+
+    fn write_history_floor(&self, floor: u64) -> Result<()> {
         self.put_unchecked(
             crate::namespace::META, "history_floor",
             serde_json::json!({"floor": floor}),
@@ -1057,7 +1110,31 @@ impl Db {
     /// object that no longer exists. `get_as_of` degrades to `None` there
     /// rather than failing, so a compacted store answers "not available at that
     /// sequence" instead of erroring or inventing a value.
+    ///
+    /// # Live branches veto it
+    ///
+    /// A branch promises a future three-way merge, and a three-way merge needs
+    /// the BASE side: the parent state as of the branch's fork point. This
+    /// prunes every superseded version down to the tip, which is exactly the
+    /// material that base is made of. Running it under a live branch would
+    /// produce "branch exists, merge ancestry gone" — a branch that can never
+    /// be reconciled and does not find that out until someone tries.
+    ///
+    /// Because compaction here is all-or-nothing to the tip, there is no honest
+    /// partial answer ("prune down to the pin" is a different algorithm, not a
+    /// parameter). So the answer is REFUSAL, naming the branches and what they
+    /// pin. There is deliberately no force flag: a bypass would be reached for
+    /// exactly when it does the damage, and a silent bypass is the thing this
+    /// interlock exists to design out. The operator's escape hatch is to merge
+    /// or abandon the branch — both of which are recorded decisions.
     pub fn compact(&self) -> Result<crate::segment::CompactStats> {
+        // Interlock first: before touching anything, ask what history is spoken
+        // for. `None` means no live branch, which is the only state in which
+        // history may be discarded freely.
+        if let Some(pinned) = crate::branch::minimum_pinned_seq(self) {
+            anyhow::bail!("{}", crate::branch::compaction_refusal(self, pinned));
+        }
+
         self.flush_all();
         let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
         for coll in self.id_index.collections() {
@@ -1069,15 +1146,24 @@ impl Db {
         }
         let stats = self.objects.compact(&live)?;
 
-        // Record where history now begins.
+        // Record where history now begins — but ONLY if history was actually
+        // discarded.
         //
-        // Without this the engine cannot tell "no writes at that sequence"
-        // from "that sequence's writes were discarded", and the two differ by
-        // whether a failed root verification means anything. A verification
-        // that cannot say which one it hit has to report PASS or FAIL, and
-        // both are lies.
-        let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
-        self.set_history_floor(tip)?;
+        // `ObjectStore::compact` is a no-op that returns zeroed stats for the
+        // loose-object (v2) and in-memory substrates: it prunes nothing at all
+        // unless the v3 segment store is active. Raising the floor
+        // unconditionally therefore declared every earlier sequence pruned on
+        // a database where nothing had been pruned, and every historical root
+        // became permanently unverifiable with reason HISTORY_PRUNED.
+        //
+        // That is a FALSE ALARM, and a false alarm is the one failure this
+        // three-state verification exists to prevent — an operator who cannot
+        // trust "unavailable" is back to guessing, which is where PASS/FAIL
+        // left them. So the floor moves on evidence: objects were dropped.
+        if stats.dropped_objects > 0 {
+            let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
+            self.set_history_floor(tip)?;
+        }
         Ok(stats)
     }
 
@@ -3044,21 +3130,51 @@ mod state_roots {
         assert_eq!(v.exit_code(), 4);
     }
 
-    /// The distinction the Oracle asked for, end to end on a real store.
+    /// Compaction must not raise the floor when it pruned nothing.
+    ///
+    /// `ObjectStore::compact` is a NO-OP returning zeroed stats on the
+    /// loose-object and in-memory substrates. An unconditional floor bump
+    /// after it declared every earlier sequence pruned on a database where
+    /// nothing had been — turning every historical root permanently
+    /// unverifiable for a reason that was not true. A false alarm defeats the
+    /// whole point of having an "unavailable" state.
     #[test]
-    fn a_pruned_history_reports_unavailable_rather_than_pass_or_fail() {
+    fn a_compaction_that_prunes_nothing_does_not_raise_the_floor() {
         let dir = tempdir().unwrap();
-        std::env::set_var("NEDB_DAG_V3", "1");
         let db = Db::open(dir.path(), None).unwrap();
         db.put("orders", "1", j(1), vec![], None, None).unwrap();
         let rec = db.create_root().unwrap();
         db.put("orders", "1", j(2), vec![], None, None).unwrap();
         db.flush_all();
 
+        let stats = db.compact().expect("compact");
+        assert_eq!(stats.dropped_objects, 0, "precondition: v2 compaction prunes nothing");
+        assert_eq!(db.history_floor(), 0, "so no history was lost, and the floor must not move");
+        assert!(
+            db.verify_root(rec.at_seq).is_verified(),
+            "the root must still verify — nothing was discarded"
+        );
+    }
+
+    /// The distinction the Oracle asked for.
+    ///
+    /// Driven through `set_history_floor` rather than a real prune because the
+    /// only substrate that prunes is selected by the process-global
+    /// `NEDB_DAG_V3` environment variable, and tests run threaded in one
+    /// process — setting it here changed the substrate under every other test
+    /// that opened a database at the same moment. The end-to-end prune is
+    /// covered in `tests/v3_integration.rs`, which is its own process.
+    #[test]
+    fn a_pruned_history_reports_unavailable_rather_than_pass_or_fail() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+
         assert!(db.verify_root(rec.at_seq).is_verified(), "verifiable before the prune");
 
-        db.compact().expect("compact");
-        std::env::remove_var("NEDB_DAG_V3");
+        let tip = db.seq.load(Ordering::SeqCst).saturating_sub(1);
+        db.set_history_floor(tip).unwrap();
 
         let v = db.verify_root(rec.at_seq);
         assert_eq!(v.record, RecordStatus::Valid, "the record itself is still fine");

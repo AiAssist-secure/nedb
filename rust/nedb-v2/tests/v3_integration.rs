@@ -169,3 +169,44 @@ fn v3_segment_substrate_end_to_end() {
 
 #[allow(dead_code)]
 fn _unused(_p: &Path) {}
+
+/// The end-to-end prune, in its own process.
+///
+/// This lives here rather than in a unit test because selecting the v3 segment
+/// substrate means setting `NEDB_DAG_V3`, which is process-global. Unit tests
+/// run threaded in one process, so setting it there silently changed the
+/// storage substrate under every other test that happened to open a database
+/// in the same instant — an intermittent failure that looked like flakiness
+/// and was actually one test reaching into another's world.
+#[test]
+fn compaction_prunes_history_and_verification_says_so_plainly() {
+    use nedb_engine::db::Db;
+    use nedb_engine::root::{RecordStatus, Recomputation, UnavailableReason};
+
+    std::env::set_var("NEDB_DAG_V3", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), None).unwrap();
+
+    db.put("orders", "1", serde_json::json!({"v": 1}), vec![], None, None).unwrap();
+    let rec = db.create_root().unwrap();
+    db.put("orders", "1", serde_json::json!({"v": 2}), vec![], None, None).unwrap();
+    db.flush_all();
+
+    assert!(db.verify_root(rec.at_seq).is_verified(), "verifiable before the prune");
+    assert_eq!(db.history_floor(), 0);
+
+    let stats = db.compact().expect("compact");
+    assert!(stats.dropped_objects > 0, "v3 compaction must actually drop the superseded version");
+    assert!(db.history_floor() > 0, "and must record where history now begins");
+
+    let v = db.verify_root(rec.at_seq);
+    assert_eq!(v.record, RecordStatus::Valid, "the record itself is still fine");
+    assert_eq!(
+        v.recomputation,
+        Recomputation::Unavailable(UnavailableReason::HistoryPruned),
+        "and the engine says plainly that it could not check it"
+    );
+    assert!(!v.is_verified(), "unavailable is not verified");
+    assert!(!v.is_mismatch(), "and it is not a mismatch either");
+    assert_eq!(v.exit_code(), 3, "its own exit code, distinct from pass and fail");
+}
