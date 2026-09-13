@@ -113,6 +113,19 @@ pub struct BranchWrite {
     /// counter. Today a branch write advances the parent's counter, which is
     /// the one place the overlay is visibly not a separate store.
     pub at_seq: u64,
+    /// The hash of the node that RECORDS this branch write — the source
+    /// identity a merge replay points back at.
+    ///
+    /// Captured at write time because it cannot be recovered later: a merge
+    /// that replayed without it would produce destination nodes with no causal
+    /// edge to what caused them, and nothing downstream could reconstruct the
+    /// link. The edge has to be written when both ends are in hand.
+    ///
+    /// Today it addresses the overlay record in the parent store. PHASE 5B: it
+    /// becomes the branch store's own node hash, and the cause it produces
+    /// becomes a qualified `Cause { store, hash }` -- see `crate::cause`.
+    #[serde(default)]
+    pub source_hash: String,
 }
 
 // ── Identity ──────────────────────────────────────────────────────────────
@@ -377,9 +390,21 @@ fn record_branch_write(db: &Db, rec: &BranchRecord, coll: &str, id: &str, value:
         id: id.to_string(),
         value,
         at_seq,
+        source_hash: String::new(),
     };
     let key = write_key(&branch_key(&rec.name, rec.created_seq), coll, id);
-    db.put_unchecked(BRANCH_WRITES, &key, serde_json::to_value(&w)?, vec![], None, None)?;
+    // Written once to get a hash, then rewritten carrying it. A node cannot
+    // contain its own hash (the hash is taken over the content), so the source
+    // identity is the FIRST node's hash and the stored record points at it.
+    let first = db.put_unchecked(
+        BRANCH_WRITES, &key, serde_json::to_value(&w)?, vec![], None, None)?;
+    let w = BranchWrite { source_hash: first.hash.clone(), ..w };
+    db.put_unchecked(
+        BRANCH_WRITES, &key, serde_json::to_value(&w)?,
+        // The second version is caused by the first: same fact, now
+        // self-identifying. Recording it keeps the overlay honest rather than
+        // leaving an unexplained double write in the chain.
+        vec![first.hash], None, None)?;
     Ok(w)
 }
 

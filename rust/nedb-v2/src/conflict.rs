@@ -64,6 +64,26 @@ pub enum ConflictKind {
 /// One document that two lines of history disagree about.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conflict {
+    /// Which branch this disagreement is WITH, and which generation of that
+    /// name — see `branch::branch_key`.
+    ///
+    /// A conflict without it is not identified. Two branches can make the same
+    /// claim about the same document for entirely different reasons, and a
+    /// human who resolved one has decided nothing at all about the other. The
+    /// key that settles a conflict is therefore
+    /// `(branch, branch_created_seq, coll, id)`, never `(coll, id)`:
+    ///
+    /// ```text
+    /// base orders/42 = 1     branch X = 7
+    /// main           = 8     branch Y = 7
+    /// ```
+    ///
+    /// Resolving X must leave Y unresolved. Keyed only by document, X's
+    /// decision would silently authorise Y's merge because the two happen to
+    /// agree about the value — which is a human decision about one line of
+    /// history being applied to another without anyone being asked.
+    pub branch: String,
+    pub branch_created_seq: u64,
     pub coll: String,
     pub id: String,
     /// The common ancestor: the destination as of the branch's `base_seq`.
@@ -100,6 +120,8 @@ pub enum Choice {
 /// The durable record that a conflict was settled, and how.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionRecord {
+    pub branch: String,
+    pub branch_created_seq: u64,
     pub coll: String,
     pub id: String,
     pub kind: ConflictKind,
@@ -119,13 +141,17 @@ pub struct ResolutionRecord {
 /// [`crate::branch`]: collection names and document ids are arbitrary user
 /// text, so any separator could occur inside either, and a key an attacker can
 /// collide by choosing an id is not a key.
-fn conflict_key(coll: &str, id: &str) -> String {
+fn conflict_key(branch: &str, created_seq: u64, coll: &str, id: &str) -> String {
     use blake2::{Blake2b512, Digest};
     let mut h = Blake2b512::new();
-    for part in [coll, id] {
+    // Length-prefixed, so no combination of names can be spelled two ways.
+    for part in [branch, coll, id] {
         h.update((part.len() as u64).to_be_bytes());
         h.update(part.as_bytes());
     }
+    // The generation, so a reused branch name does not inherit the previous
+    // branch's decisions. A name is a working label; this pair is the identity.
+    h.update(created_seq.to_be_bytes());
     hex::encode(&h.finalize()[..32])
 }
 
@@ -158,6 +184,8 @@ pub fn resolve(db: &Db, c: &Conflict, r: Resolution) -> Result<()> {
 
     let at_seq = db.seq.load(Ordering::SeqCst).saturating_sub(1);
     let rec = ResolutionRecord {
+        branch: c.branch.clone(),
+        branch_created_seq: c.branch_created_seq,
         coll: c.coll.clone(),
         id: c.id.clone(),
         kind: c.kind,
@@ -170,7 +198,7 @@ pub fn resolve(db: &Db, c: &Conflict, r: Resolution) -> Result<()> {
     };
     db.put_unchecked(
         CONFLICTS,
-        &conflict_key(&c.coll, &c.id),
+        &conflict_key(&c.branch, c.branch_created_seq, &c.coll, &c.id),
         serde_json::to_value(&rec)?,
         vec![], None, None,
     )?;
@@ -178,8 +206,10 @@ pub fn resolve(db: &Db, c: &Conflict, r: Resolution) -> Result<()> {
 }
 
 /// The most recent decision recorded about a document, if any.
-pub fn resolution_for(db: &Db, coll: &str, id: &str) -> Option<ResolutionRecord> {
-    let n = db.get(CONFLICTS, &conflict_key(coll, id))?;
+pub fn resolution_for(db: &Db, branch: &str, created_seq: u64, coll: &str, id: &str)
+    -> Option<ResolutionRecord>
+{
+    let n = db.get(CONFLICTS, &conflict_key(branch, created_seq, coll, id))?;
     serde_json::from_value(n.data).ok()
 }
 
@@ -209,7 +239,12 @@ pub fn resolutions(db: &Db) -> Vec<ResolutionRecord> {
 /// decision still answers it. If the branch has since written something else,
 /// that is a new disagreement and it gets reported.
 pub(crate) fn is_settled(db: &Db, c: &Conflict) -> bool {
-    match resolution_for(db, &c.coll, &c.id) {
+    match resolution_for(db, &c.branch, c.branch_created_seq, &c.coll, &c.id) {
+        // Scoped to the branch GENERATION, then matched on the branch's claim.
+        // The generation scoping is what stops one branch's decision settling
+        // another's identical claim; the claim match is what makes a branch
+        // that has since written something else a new disagreement rather than
+        // a settled one.
         Some(rec) => rec.theirs == c.theirs,
         None => false,
     }
@@ -224,6 +259,8 @@ mod tests {
 
     fn a_conflict() -> Conflict {
         Conflict {
+            branch: "b".into(),
+            branch_created_seq: 0,
             coll: "orders".into(),
             id: "42".into(),
             base: Some(j(1)),
@@ -308,7 +345,7 @@ mod tests {
         assert_eq!(r.theirs, Some(j(3)));
         assert_eq!(r.choice, Choice::Theirs);
         assert_eq!(r.chosen, Some(j(3)));
-        assert_eq!(resolution_for(&db, "orders", "42").as_ref(), Some(r));
+        assert_eq!(resolution_for(&db, "b", 0, "orders", "42").as_ref(), Some(r));
     }
 
     #[test]
@@ -319,10 +356,10 @@ mod tests {
         let after_first = db.seq.load(Ordering::SeqCst) - 1;
         resolve(&db, &a_conflict(), Resolution::TakeTheirs).unwrap();
 
-        assert_eq!(resolution_for(&db, "orders", "42").unwrap().choice, Choice::Theirs);
+        assert_eq!(resolution_for(&db, "b", 0, "orders", "42").unwrap().choice, Choice::Theirs);
         assert_eq!(resolutions(&db).len(), 1, "one live record per document");
         // The earlier decision is still readable through the version chain.
-        let old = db.get_as_of(CONFLICTS, &conflict_key("orders", "42"), after_first).unwrap();
+        let old = db.get_as_of(CONFLICTS, &conflict_key("b", 0, "orders", "42"), after_first).unwrap();
         let old: ResolutionRecord = serde_json::from_value(old.data).unwrap();
         assert_eq!(old.choice, Choice::Ours);
     }
@@ -343,9 +380,14 @@ mod tests {
 
     #[test]
     fn conflict_keys_cannot_be_forged_by_a_clever_id() {
-        assert_ne!(conflict_key("a", "b|c"), conflict_key("a|b", "c"));
-        assert_ne!(conflict_key("ab", "c"), conflict_key("a", "bc"));
-        assert_eq!(conflict_key("a", "b"), conflict_key("a", "b"));
+        assert_ne!(conflict_key("br", 0, "a", "b|c"), conflict_key("br", 0, "a|b", "c"));
+        assert_ne!(conflict_key("br", 0, "ab", "c"), conflict_key("br", 0, "a", "bc"));
+        assert_eq!(conflict_key("br", 0, "a", "b"), conflict_key("br", 0, "a", "b"));
+        // The branch name and generation are part of the key, not decoration.
+        assert_ne!(conflict_key("x", 0, "a", "b"), conflict_key("y", 0, "a", "b"));
+        assert_ne!(conflict_key("x", 0, "a", "b"), conflict_key("x", 1, "a", "b"));
+        // And a name cannot be spelled into another branch's slot.
+        assert_ne!(conflict_key("xa", 0, "b", "c"), conflict_key("x", 0, "ab", "c"));
     }
 
     #[test]
@@ -357,5 +399,177 @@ mod tests {
         db.flush_all();
         assert_eq!(db.get("orders", "42").unwrap().data, j(3));
         assert_eq!(resolutions(&db).len(), 1);
+    }
+}
+
+/// The two correctness holes the architecture review found in the first cut,
+/// held shut.
+#[cfg(test)]
+mod scoped_to_the_branch_that_raised_it {
+    use super::*;
+    use crate::branch::{branch_put, create_branch, get_branch};
+    use crate::merge;
+
+    fn j(v: u64) -> Value { serde_json::json!({ "v": v }) }
+
+    /// The reported case, exactly.
+    ///
+    /// ```text
+    /// base orders/42 = 1     branch X = 7
+    /// main           = 8     branch Y = 7
+    /// ```
+    ///
+    /// Resolve X. Y must still be unresolved: nobody was asked about Y, and
+    /// two branches agreeing about a value is not one of them agreeing to the
+    /// other's merge.
+    #[test]
+    fn resolving_one_branch_does_not_settle_another_making_the_same_claim() {
+        let db = Db::in_memory();
+        db.put("orders", "42", j(1), vec![], None, None).unwrap();
+        let base = db.seq.load(Ordering::SeqCst) - 1;
+
+        create_branch(&db, "x", base).unwrap();
+        create_branch(&db, "y", base).unwrap();
+        branch_put(&db, "x", "orders", "42", j(7)).unwrap();
+        branch_put(&db, "y", "orders", "42", j(7)).unwrap();
+        db.put("orders", "42", j(8), vec![], None, None).unwrap();
+
+        let px = merge::plan(&db, "x").unwrap();
+        let py = merge::plan(&db, "y").unwrap();
+        assert_eq!(px.conflicts.len(), 1, "X disagrees with the destination");
+        assert_eq!(py.conflicts.len(), 1, "so does Y");
+
+        resolve(&db, &px.conflicts[0], Resolution::TakeOurs).unwrap();
+
+        assert!(is_settled(&db, &px.conflicts[0]), "X was decided");
+        assert!(
+            !is_settled(&db, &py.conflicts[0]),
+            "NOBODY decided Y — a human decision about one line of history must \
+             not implicitly authorise another"
+        );
+        assert_eq!(
+            merge::plan(&db, "y").unwrap().conflicts.len(), 1,
+            "and Y must still be planned as conflicted"
+        );
+    }
+
+    /// A reused branch name does not inherit the previous branch's decisions.
+    #[test]
+    fn a_new_generation_of_a_name_starts_unresolved() {
+        let db = Db::in_memory();
+        db.put("orders", "42", j(1), vec![], None, None).unwrap();
+        let base = db.seq.load(Ordering::SeqCst) - 1;
+
+        create_branch(&db, "fix", base).unwrap();
+        branch_put(&db, "fix", "orders", "42", j(7)).unwrap();
+        db.put("orders", "42", j(8), vec![], None, None).unwrap();
+        let first = merge::plan(&db, "fix").unwrap().conflicts.remove(0);
+        resolve(&db, &first, Resolution::TakeOurs).unwrap();
+        assert!(is_settled(&db, &first));
+        crate::branch::abandon_branch(&db, "fix").unwrap();
+
+        // Same label, new line of work.
+        let base2 = db.seq.load(Ordering::SeqCst) - 1;
+        create_branch(&db, "fix", base2).unwrap();
+        branch_put(&db, "fix", "orders", "42", j(7)).unwrap();
+        db.put("orders", "42", j(9), vec![], None, None).unwrap();
+
+        let again = merge::plan(&db, "fix").unwrap();
+        assert_eq!(again.conflicts.len(), 1);
+        assert!(
+            !is_settled(&db, &again.conflicts[0]),
+            "a name is a working label; the decision belonged to the generation"
+        );
+        assert_ne!(
+            get_branch(&db, "fix").unwrap().created_seq, first.branch_created_seq,
+            "precondition: this really is a different generation"
+        );
+    }
+
+    #[test]
+    fn a_resolution_records_which_branch_it_was_taken_against() {
+        let db = Db::in_memory();
+        db.put("orders", "42", j(1), vec![], None, None).unwrap();
+        let base = db.seq.load(Ordering::SeqCst) - 1;
+        create_branch(&db, "x", base).unwrap();
+        branch_put(&db, "x", "orders", "42", j(7)).unwrap();
+        db.put("orders", "42", j(8), vec![], None, None).unwrap();
+
+        let c = merge::plan(&db, "x").unwrap().conflicts.remove(0);
+        resolve(&db, &c, Resolution::TakeTheirs).unwrap();
+
+        let gen = get_branch(&db, "x").unwrap().created_seq;
+        let rec = resolution_for(&db, "x", gen, "orders", "42")
+            .expect("the decision is recorded under the branch that raised it");
+        assert_eq!(rec.branch, "x");
+        assert_eq!(rec.branch_created_seq, gen);
+        // And not findable under a branch that never raised it.
+        assert!(resolution_for(&db, "y", gen, "orders", "42").is_none());
+    }
+}
+
+/// Merge replay must not produce causally anonymous nodes.
+#[cfg(test)]
+mod replay_carries_its_cause {
+    use super::*;
+    use crate::branch::{branch_put, create_branch};
+    use crate::merge;
+
+    fn j(v: u64) -> Value { serde_json::json!({ "v": v }) }
+
+    #[test]
+    fn a_replayed_write_points_back_at_the_branch_write_that_caused_it() {
+        let db = Db::in_memory();
+        db.put("orders", "a", j(1), vec![], None, None).unwrap();
+        let base = db.seq.load(Ordering::SeqCst) - 1;
+        create_branch(&db, "x", base).unwrap();
+        let bw = branch_put(&db, "x", "orders", "a", j(2)).unwrap();
+        assert!(!bw.source_hash.is_empty(), "the branch write is addressable");
+
+        let plan = merge::plan(&db, "x").unwrap();
+        assert!(plan.is_clean());
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].source_hash, bw.source_hash,
+                   "the plan carries the source identity through");
+
+        merge::execute(&db, &plan).unwrap();
+
+        let landed = db.get("orders", "a").expect("the replay landed");
+        assert_eq!(landed.data, j(2));
+        assert_eq!(
+            landed.caused_by, vec![bw.source_hash.clone()],
+            "the destination node names the branch write that caused it"
+        );
+
+        // And the edge is walkable, not just stored on the node.
+        let traced = db.trace(&landed.hash, false, 10);
+        assert!(
+            traced.iter().any(|n| n.hash == bw.source_hash),
+            "TRACE must reach the branch write from the merged node"
+        );
+    }
+
+    #[test]
+    fn every_replayed_change_carries_a_cause() {
+        let db = Db::in_memory();
+        for i in 0..4u64 {
+            db.put("orders", &i.to_string(), j(1), vec![], None, None).unwrap();
+        }
+        let base = db.seq.load(Ordering::SeqCst) - 1;
+        create_branch(&db, "x", base).unwrap();
+        for i in 0..4u64 {
+            branch_put(&db, "x", "orders", &i.to_string(), j(2)).unwrap();
+        }
+        let plan = merge::plan(&db, "x").unwrap();
+        assert_eq!(plan.changes.len(), 4);
+        assert!(
+            plan.changes.iter().all(|c| !c.source_hash.is_empty()),
+            "a plan with an anonymous change would replay an anonymous node"
+        );
+        merge::execute(&db, &plan).unwrap();
+        for i in 0..4u64 {
+            let n = db.get("orders", &i.to_string()).unwrap();
+            assert_eq!(n.caused_by.len(), 1, "doc {} lost its causal edge", i);
+        }
     }
 }
