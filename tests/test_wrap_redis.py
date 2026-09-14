@@ -182,6 +182,7 @@ check("TRAVERSE returns trips",   len(traversed) >= 1)
 section("Hash chain integrity")
 # ─────────────────────────────────────────────────────────────────────────────
 r7 = fresh()
+_seq_before = r7.nedb.seq
 for i in range(10):
     r7.nedb.put("item", f"i{i}", {"v": i})
 check("verify() on 10 writes",    r7.nedb.verify())
@@ -191,7 +192,17 @@ check("verify() on 10 writes",    r7.nedb.verify())
 # codified the bug. A bound method is truthy, which is why nothing noticed.
 check("head is a 64-char hex string", len(r7.nedb.head) == 64)
 check("head is a str, not a bound method", isinstance(r7.nedb.head, str))
-check("seq == 9",                  r7.nedb.seq == 9)
+# Ten writes land at ten CONSECUTIVE sequences, but not necessarily starting
+# at zero: registering a collection is itself a write. Assert the span, which
+# is what "ten writes advanced the log by ten" actually means, rather than a
+# head number that also counts the engine's bookkeeping.
+# Ten documents land, and the log also gains the one record that registers
+# the collection they land in — eleven ops for ten writes. Assert the rows,
+# which is what the sentence means, plus the span so a silently-doubled write
+# would still be caught.
+check("ten writes are all present", len(r7.nedb.query("FROM item")) == 10)
+check("and the log advanced by ten writes plus one registration",
+      r7.nedb.seq - _seq_before == 11, f"{_seq_before} -> {r7.nedb.seq}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 section("Redis persistence: stream survives restart")

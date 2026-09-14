@@ -104,14 +104,22 @@ try:
         docs.append({"seq": op.seq, "name": name, "hash": op.hash})
         ok(f"put users/u{i} ({name}) at seq={op.seq}, op.hash={op.hash[:12]}...")
 
-    chk("five writes produced five Ops", len(db.log.ops) == 5)
+    # Count the writes into `users`, not every op in the log: registering a
+    # collection is itself an op, so a five-write log is six ops long.
+    _user_ops = [o for o in db.log.ops if o.payload.get("coll") == "users"]
+    chk("five writes produced five Ops", len(_user_ops) == 5)
     chk("engine chain verifies",          db.verify())
 
     # ───────────────────────────────────────────────────────────────────────
-    banner("SCENE 2 - request a proof for the MIDDLE write (seq=2 / Carol)")
+    banner("SCENE 2 - request a proof for the MIDDLE write (Carol)")
     target = docs[2]
     chk("middle doc is Carol",  target["name"] == "Carol")
-    chk("middle doc is seq=2",  target["seq"] == 2)
+    # NOT a literal 2. Registering `users` is itself an op, so the five
+    # writes sit at 1..5 and the middle one is at 3. What the scene is about
+    # is proving a write in the MIDDLE of the log, so the assertion is that
+    # it has writes on both sides of it.
+    chk("middle doc has writes on both sides",
+        0 < target["seq"] < len(db.log.ops) - 1)
 
     proof = build_proof(db, target["hash"])
     ok(f"proof.hash       = {proof['hash'][:12]}...")
@@ -120,12 +128,13 @@ try:
     ok(f"proof.subsequent = {len(proof['subsequent'])} subsequent op-hashes")
     ok(f"proof.head       = {proof['head'][:12]}... (derived)")
 
-    chk("proof.seq matches target",                       proof["seq"] == 2)
+    chk("proof.seq matches target",          proof["seq"] == target["seq"])
     chk("proof has exactly N - seq - 1 subsequent ops",
         len(proof["subsequent"]) == len(db.log.ops) - target["seq"] - 1)
     # prev_head is the Merkle fold over op-hashes [0..seq-1], NOT the engine's
     # per-op op.prev_hash. The two are different (but parallel) commitment chains.
-    expected_prev = fold_head([o.hash for o in db.log.ops[:2]], start=GENESIS)
+    expected_prev = fold_head([o.hash for o in db.log.ops[:target["seq"]]],
+                              start=GENESIS)
     chk("proof.prev_head equals fold-of-prior-op-hashes",
         proof["prev_head"] == expected_prev)
 
@@ -203,8 +212,8 @@ try:
     db2 = NEDB(tmp)
     chk("chain verifies after reload",                       db2.verify())
     # Recompute the proof against the reloaded engine — must produce the same fold.
-    target_hash_after = db2.log.ops[2].hash
-    chk("op.hash for seq=2 survives the reload",
+    target_hash_after = db2.log.ops[target["seq"]].hash
+    chk("the target op.hash survives the reload",
         target_hash_after == target["hash"])
     proof_after = build_proof(db2, target_hash_after)
     chk("reloaded proof.head matches original",
