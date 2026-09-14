@@ -60,7 +60,18 @@ SUBMODULES = ["distributions/%s" % d for _, d in FORKS]
 COMMON = ["package.json", "pyproject.toml", "rust/Cargo.toml", "rust/nedb-v2/Cargo.toml",
           "rust/crates/nedb-py/pyproject.toml", "python/nedb/__init__.py",
           "client/node/package.json", "client/python/pyproject.toml",
-          "client/python/nedb_client/__init__.py"]
+          "client/python/nedb_client/__init__.py",
+          # nesql-cli was absent from this list for its first release cycle,
+          # which would have bumped the engine and left the CLI behind. That is
+          # worse than cosmetic drift: the crate carries
+          #   nedb-engine = { path = "../nedb-v2", version = "<engine>" }
+          # and cargo enforces a path dependency's version requirement, so the
+          # moment nedb-v2 moved and this did not, `cargo build -p nesql-cli`
+          # would fail to resolve. KEYS already matches both the `version` line
+          # and the `nedb-engine` line, so one entry fixes both.
+          # Absent from the distribution forks, where the existing
+          # os.path.exists guard skips it.
+          "rust/nesql-cli/Cargo.toml"]
 KEYS = ("version", "nedb-engine", "nedb_engine", "nedb-core", "nedb_core")
 
 TOK = os.environ.get("GITHUB_TOKEN")
@@ -141,6 +152,19 @@ def core_versions(root, distro=None):
     out["pypi pyproject.toml"] = first_ver("pyproject.toml")
     out["rust workspace"] = first_ver("rust/Cargo.toml")
     out["engine nedb-v2"] = first_ver("rust/nedb-v2/Cargo.toml")
+    # The CLI, and separately its requirement on the engine. Both are checked
+    # because they can drift independently and the second one is the dangerous
+    # half: a stale `nedb-engine = { version = ... }` makes `cargo build -p
+    # nesql-cli` unresolvable, and nothing else in this script would notice.
+    # Returns None on the distribution forks, where the crate does not exist,
+    # and assert_all_to ignores None.
+    out["cli nesql"] = first_ver("rust/nesql-cli/Cargo.toml")
+    cli = os.path.join(root, "rust", "nesql-cli", "Cargo.toml")
+    if os.path.exists(cli):
+        m = re.search(r'nedb-engine\s*=\s*\{[^}]*version\s*=\s*"([^"]+)"', open(cli).read())
+        # Named as missing rather than skipped: if the dependency line stops
+        # carrying a version the gate must say so, not fall silent.
+        out["cli nedb-engine dep"] = m.group(1) if m else "MISSING"
     if distro:
         wf = os.path.join(root, "rust", "crates", distro, "Cargo.toml")
         if os.path.exists(wf):
