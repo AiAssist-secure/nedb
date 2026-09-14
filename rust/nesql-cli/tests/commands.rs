@@ -229,6 +229,64 @@ fn grammar_and_version_answer_without_a_database() {
 }
 
 #[test]
+fn a_cli_is_compatible_with_the_engine_it_is_compiled_against() {
+    // The one verdict that must never be reachable in a single build. v6.1.0
+    // reported INCOMPATIBLE against v6.1.0 because the claim carried the CLI's
+    // COMMAND SURFACE digest in the field meaning NQL GRAMMAR digest -- two
+    // hashes over two different artifacts, so they could not agree, so every
+    // `nql.*` capability was unpromisable.
+    //
+    // Asserted on the exit code as well as the text: a user scripting against
+    // this got exit 5 (unsupported) from a working pair of binaries.
+    let dir = tempfile::tempdir().unwrap();
+    let db = seed(dir.path());
+    let r = cmd::constitution::run(&db);
+    assert_eq!(
+        r.exit,
+        Exit::Ok,
+        "a CLI must be compatible with the engine it links; verdict was {:?}\n{}",
+        r.body["verdict"],
+        r.human
+    );
+    assert_ne!(r.body["verdict"], "INCOMPATIBLE");
+
+    // Gaps are expected and healthy in ONE direction only. "this build did not
+    // ask for: nql.having" is a subset client, which the claim is deliberately
+    // built to be -- requiring more than you use turns a harmless version skew
+    // into a refusal to start. "engine does not advertise: X" is the direction
+    // that means something, because X is something this CLI needs.
+    let unmet: Vec<&str> = r.body["detail"]
+        .as_array()
+        .map(|d| {
+            d.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|s| s.starts_with("engine does not advertise"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(unmet.is_empty(), "the engine is missing something this CLI needs: {:?}", unmet);
+}
+
+#[test]
+fn the_nql_grammar_digest_and_the_command_surface_digest_are_not_conflated() {
+    // They are different artifacts and must be carried in different fields.
+    // If these two ever become equal it is overwhelmingly likely someone
+    // assigned one to the other again rather than that two BLAKE2b digests
+    // over different inputs collided.
+    let dir = tempfile::tempdir().unwrap();
+    let db = seed(dir.path());
+    let r = cmd::constitution::run(&db);
+    let claimed = r.body["client"]["grammar_digest"].as_str().unwrap();
+    let engine_nql = r.body["constitution"]["grammar_digest"].as_str().unwrap();
+    assert_eq!(claimed, engine_nql, "the claim must carry the NQL grammar digest");
+    assert_ne!(
+        claimed,
+        nesql::grammar::digest(),
+        "the NQL grammar digest must not be the CLI's command-surface digest"
+    );
+}
+
+#[test]
 fn constitution_checks_this_cli_against_this_engine() {
     let dir = tempfile::tempdir().unwrap();
     let db = seed(dir.path());
