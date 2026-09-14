@@ -186,12 +186,25 @@ def suite_psycopg3(pg_port):
 
             # An error mid-sequence must be reported and must not desynchronise
             # the connection — the next statement has to work.
+            # This used to assert the error said "JOIN", because the
+            # translator refused joins BY NAME — NQL is single-collection, so
+            # the join itself was the complaint. The evaluator performs joins,
+            # so the only thing wrong with this statement now is that `x` does
+            # not exist, and that is what it says.
+            #
+            # The assertion that matters is unchanged and is the one the
+            # comment above describes: an error mid-sequence is REPORTED
+            # (never a silent empty result) and does not desynchronise the
+            # connection. It now checks the error names the relation at
+            # fault, which is the more useful guarantee than naming a
+            # limitation we removed.
             try:
                 cur.execute("SELECT * FROM orders JOIN x ON true WHERE a = %s", (1,))
-                check("an unsupported statement is refused at Parse", False, "no error")
+                check("a bad relation mid-sequence is an error, not empty rows",
+                      False, "no error — a typo answered successfully")
             except Exception as e:                                  # noqa: BLE001
-                check("an unsupported statement is refused at Parse",
-                      "JOIN" in str(e), str(e)[:80])
+                check("a bad relation mid-sequence is an error, not empty rows",
+                      "x" in str(e) and "does not exist" in str(e), str(e)[:80])
 
         # A fresh cursor after the error proves the stream resynchronised on Sync.
         with conn.cursor() as cur:

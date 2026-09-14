@@ -316,14 +316,25 @@ def run_explain_suite(cur):
           any("Seq Scan" in l
               for l in q("EXPLAIN ANALYZE SELECT nspname FROM pg_namespace")))
 
-    # A statement the SQL evaluator does NOT run must not be given a plan that
-    # describes a pipeline it never took.
+    # A USER COLLECTION NOW GETS A REAL PLAN.
+    #
+    # These two assertions used to require the opposite: that EXPLAIN over a
+    # user collection said "the NQL path runs this" and reported NO plan,
+    # because the SQL evaluator genuinely did not run the statement — the
+    # translator did, and inventing a pipeline the query never took would
+    # have been a lie in the one place a reader goes to find out what ran.
+    #
+    # The evaluator now answers every SELECT it can parse, so there is a real
+    # pipeline to report and refusing to report it would be the lie instead.
+    # The assertion is inverted rather than dropped: "EXPLAIN describes what
+    # actually ran" is the invariant in both worlds, and only the answer
+    # changed.
     user = q("EXPLAIN SELECT * FROM orders")
-    check("a statement the NQL path runs says so instead of inventing a plan",
-          any("NQL path" in l for l in user) and not any("Seq Scan" in l for l in user),
+    check("a user collection gets a real plan, not an apology",
+          any("Seq Scan" in l for l in user) and not any("NQL path" in l for l in user),
           f"{user}")
-    check("and it says WHY no plan is reported",
-          any("never executed" in l for l in user), f"{user}")
+    check("...naming the collection it scanned",
+          any("orders" in l for l in user), f"{user}")
 
     # The plan must describe the query asked about, not a cached one.
     a = q("EXPLAIN SELECT nspname FROM pg_namespace")

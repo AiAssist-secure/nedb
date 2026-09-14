@@ -1558,6 +1558,15 @@ pub fn oid_for_column(rows: &[Value], col: &str) -> i32 {
     oid_for(rows, col)
 }
 
+/// Did any row actually carry a non-null value for this column?
+///
+/// `oid_for` cannot answer this: it folds "no evidence" and "evidence, all
+/// text" into the same `OID_TEXT`. The difference matters, because one of
+/// those is a measurement and the other is a default standing in for one.
+fn has_evidence(rows: &[Value], col: &str) -> bool {
+    rows.iter().any(|r| matches!(r.get(col), Some(v) if !v.is_null()))
+}
+
 fn oid_for(rows: &[Value], col: &str) -> i32 {
     let mut acc: Option<i32> = None;
     for r in rows {
@@ -1847,6 +1856,104 @@ fn infer_field_oid(db: Option<&Arc<Db>>, coll: &str, field: &str) -> i32 {
 /// So aggregates are typed from what the aggregate MEANS: a count is always an
 /// integer, an average is always fractional, and min/max/sum inherit the type
 /// of the field they were computed over.
+/// Column names and wire types for a statement the EVALUATOR will answer.
+///
+/// `describe_shape` derived both by calling `translate()`, which means it
+/// described the TRANSLATOR's output. That was right while the translator
+/// answered; once the evaluator did, the two disagreed about the one thing
+/// `Describe` exists to report.
+///
+/// They disagree on naming. `SELECT sum(total)` is column `sum_total` to the
+/// translator and `sum` to the evaluator, so `aggregate_oid("sum", ..)` found
+/// no `sum_` prefix, fell through to `infer_field_oid(db, coll, "sum")`, found
+/// no stored field called `sum`, and answered `OID_TEXT`.
+///
+/// A text OID is not a cosmetic defect in the BINARY protocol. `Describe`
+/// happens before `Execute`, so the client is told the column is text and
+/// decodes the bytes that way: asyncpg received the string `'420'` where
+/// `420` was meant, and `AS OF SYSTEM TIME $1` came back `total='66'`. The
+/// text protocol was unaffected — it re-derives types from the rows it
+/// actually has — which is why psycopg2's suite stayed green while asyncpg's
+/// did not.
+///
+/// Typed from the PARSED SELECT rather than from a sample of the output,
+/// because `Describe` has no rows yet. That is also why this cannot simply
+/// reuse the row-sniffing path.
+fn evaluator_shape(
+    sql: &str,
+    db: Option<&Arc<Db>>,
+    coll: &str,
+) -> Option<(Vec<Col>, Vec<i32>)> {
+    let sel = crate::sqlselect::parse(sql).ok()?;
+    // `*` expands from the rows, which Describe does not have. Declining is
+    // honest; the caller falls back and the text path types it from the rows.
+    if sel.items.iter().any(|i| matches!(i.expr, crate::sqlselect::Expr::Star
+        | crate::sqlselect::Expr::QualifiedStar(_)))
+    {
+        return None;
+    }
+
+    let mut cols: Vec<Col> = Vec::new();
+    let mut oids: Vec<i32> = Vec::new();
+    for item in &sel.items {
+        let name = match &item.alias {
+            Some(a) => a.clone(),
+            None => match &item.expr {
+                crate::sqlselect::Expr::Column { name, .. } => name.clone(),
+                crate::sqlselect::Expr::Agg { name, .. } => name.to_ascii_lowercase(),
+                crate::sqlselect::Expr::Func { name, .. } => name.to_ascii_lowercase(),
+                // Anything else is named by a rule this function should not
+                // try to reproduce from memory. Declining beats guessing a
+                // name the evaluator will not use.
+                _ => return None,
+            },
+        };
+        oids.push(expr_oid(&item.expr, db, coll)?);
+        cols.push(Col::renamed(&name, &name));
+    }
+    if cols.is_empty() {
+        return None;
+    }
+    Some((cols, oids))
+}
+
+/// The wire type of one select-list expression.
+fn expr_oid(e: &crate::sqlselect::Expr, db: Option<&Arc<Db>>, coll: &str) -> Option<i32> {
+    use crate::sqlselect::Expr;
+    match e {
+        Expr::Column { name, .. } => Some(infer_field_oid(db, coll, name)),
+        Expr::Literal(v) => Some(oid_of_value(v).unwrap_or(OID_TEXT)),
+        // Aggregates are `Agg`, NOT `Func`. Matching only `Func` here is what
+        // made this whole fallback inert: `expr_oid` answered None for every
+        // aggregate, `evaluator_shape` propagated the None, and the caller's
+        // `unwrap_or(OID_TEXT)` shipped `sum` as text. The unit tests did not
+        // catch it because they exercised `aggregate_oid`, which types from a
+        // NAME; nothing typed from a parsed expression until this existed.
+        Expr::Agg { name, args, .. } | Expr::Func { name, args } => {
+            let f = name.to_ascii_lowercase();
+            match f.as_str() {
+                // COUNT is a count whatever it counts.
+                "count" => Some(OID_INT8),
+                // An average is fractional even over integers — the case the
+                // translator also special-cased.
+                "avg" => Some(OID_FLOAT8),
+                // SUM/MIN/MAX inherit the type they range over, so the
+                // argument has to be resolved rather than assumed numeric.
+                "sum" | "min" | "max" => match args.first() {
+                    Some(Expr::Column { name, .. }) => match infer_field_oid(db, coll, name) {
+                        OID_INT8 => Some(OID_INT8),
+                        OID_FLOAT8 => Some(OID_FLOAT8),
+                        other => Some(other),
+                    },
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn aggregate_oid(src: &str, db: Option<&Arc<Db>>, coll: &str) -> Option<i32> {
     if src == "count" {
         return Some(OID_INT8);
@@ -2491,22 +2598,64 @@ fn describe_shape(
     // Column types come from the values it actually produced, unified across
     // the rows by the same `oid_for` every other path uses — so a column
     // advertised `int8` is one the wire really encodes as int8.
+    let coll = stmt_collection(sql);
+
     if sql_engine_owns(&probe) {
         if let Ok(Some((done, _))) = try_catalog_select(&probe, db) {
             if done.project.is_empty() {
                 return None;
             }
-            let oids = done
+            // Sniffing the probe's OUTPUT is only sound when the probe
+            // produced output. It frequently does not, and the reason is
+            // structural rather than unlucky: `probe_sql` substitutes `0` for
+            // every parameter, so `... WHERE region = $1` becomes
+            // `... WHERE region = 0`, matches nothing, and hands this line an
+            // empty `rows`. `oid_for` then finds no evidence and returns its
+            // `unwrap_or(OID_TEXT)` default.
+            //
+            // In the BINARY protocol that default is not a shrug, it is a
+            // wrong answer the client cannot recover from: `Describe`
+            // precedes `Execute`, so asyncpg was told `sum` was text and
+            // decoded 420 as the string "420". The text protocol re-derives
+            // types from the rows it really got, which is why psycopg2's
+            // suite stayed green throughout and only asyncpg's went red.
+            //
+            // So: evidence where there is evidence, and static inference from
+            // the STORED data where there is none — which is what the
+            // translator's `infer_field_oid` was doing all along.
+            let fallback = evaluator_shape(&probe, db, &coll);
+            let oids: Vec<i32> = done
                 .project
                 .iter()
-                .map(|c| oid_for(&done.rows, &c.src))
+                .enumerate()
+                .map(|(i, c)| {
+                    let seen = has_evidence(&done.rows, &c.src);
+                    if seen {
+                        oid_for(&done.rows, &c.src)
+                    } else {
+                        fallback
+                            .as_ref()
+                            .and_then(|(_, o)| o.get(i).copied())
+                            .unwrap_or(OID_TEXT)
+                    }
+                })
                 .collect();
             return Some((done.project, oids));
         }
     }
 
+
+    // Ask the engine that will actually answer. Falls through when the
+    // evaluator declines to describe itself — `SELECT *` expands from rows
+    // Describe has not read — and the translator's shape is then the better
+    // of the two available answers rather than the right one.
+    if sql_engine_owns(&probe) {
+        if let Some(shape) = evaluator_shape(&probe, db, &coll) {
+            return Some(shape);
+        }
+    }
+
     let stmt = translate(&probe).ok()?;
-    let coll = stmt_collection(sql);
 
     let cols = match stmt {
         Stmt::Ok(_) => return None,
@@ -3589,6 +3738,68 @@ fn try_catalog_select(
             if let Ok((rows, _)) = crate::nql::query(db, &filtered) {
                 return Ok(Some(crate::sqlselect::from_vec(rows)));
             }
+        }
+        // A collection that does not exist is NOT an empty one.
+        //
+        // `nql::query` used to error on an unknown collection, and the `Err`
+        // arm returned `Ok(None)` — which the evaluator reports as
+        // `relation "x" does not exist`. Reading the store directly lost that
+        // for free, because `relation::read` on a name nothing was ever
+        // written under returns an empty Vec, indistinguishable from a
+        // collection that exists and is empty.
+        //
+        // The cost of getting this wrong is a typo answering successfully:
+        // `SELECT * FROM orders JOIN x ON true` returned `[]` rather than
+        // naming `x`, and an empty join result looks exactly like a correct
+        // answer about data that isn't there.
+        //
+        // `list_ids_including_deleted` rather than `collections`, so a
+        // collection whose rows have all been deleted still EXISTS. Its
+        // tombstones are the evidence it did.
+        // A CATALOGUE relation is exempt, and the distinction is deliberate.
+        // `pg_db_role_setting` and friends are things NEDB has nothing for;
+        // the documented behaviour is that they are EMPTY rather than an
+        // error, because a client introspecting the catalogue is asking "is
+        // there anything here" and "no" is a valid answer. `psql \drds` walks
+        // exactly such a relation, and my first version of this check broke
+        // it. A user collection is the opposite case: nobody types a
+        // collection name hoping it does not exist.
+        // Membership is by SCHEMA, not by a list of names we happen to
+        // implement. `is_catalog` alone was not enough: `pg_db_role_setting`
+        // is in neither its match arm nor EMPTY_CATALOG, so `psql \drds`
+        // started reporting `relation "pg_catalog.pg_db_role_setting" does
+        // not exist` — a regression against the documented stance that what
+        // NEDB has nothing for is EMPTY rather than an error. Enumerating
+        // catalogue relations means the next introspection command psql
+        // grows breaks the same way.
+        let catalogue = crate::pgcatalog::is_catalog(&cname)
+            || cname.starts_with("pg_")
+            || cname.starts_with("information_schema.");
+        let known = catalogue
+            || db.collections().iter().any(|c| c == &cname)
+            || !db.list_ids_including_deleted(&cname).is_empty();
+
+        // TWO CONTEXTS, TWO RIGHT ANSWERS — and they used to be distinguished
+        // for free, because the evaluator only ever served catalogue
+        // relations. Now that it serves user collections too, the distinction
+        // has to be made on purpose or one of the two answers is lost.
+        //
+        //   SINGLE RELATION -> EMPTY. NEDB is schemaless and a collection is
+        //   created by its first write, so "does not exist" and "is empty"
+        //   are the same observable state. Erroring makes it impossible to
+        //   read a collection before writing to it.
+        //
+        //   A JOIN -> ERROR. Nobody joins against a relation they believe is
+        //   absent; there the name is a typo or a bug, and an empty join
+        //   result is indistinguishable from a correct answer about data that
+        //   is not there. `SELECT * FROM orders JOIN x ON true` returning []
+        //   is the failure this guards.
+        //
+        // I flattened both into "error" first, which broke `psql \drds` and
+        // the documented schemaless read. The rule is the one the test for it
+        // already spelled out.
+        if !known && !sel.joins.is_empty() {
+            return Ok(None);
         }
         Ok(Some(crate::sqlselect::from_vec(crate::relation::read_json(db, &scan))))
     };
@@ -5319,3 +5530,4 @@ mod tests {
         assert_eq!(fmt_float(3.5), "3.5");
     }
 }
+

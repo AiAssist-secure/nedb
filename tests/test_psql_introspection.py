@@ -402,12 +402,21 @@ def main():
                     "WHERE orders.status = 'paid') AS anon_1")))
         # ...but only when the two counts MUST agree. A LIMIT inside would make
         # them different numbers, so it is refused rather than flattened.
-        try:
-            q("SELECT count(*) FROM (SELECT _id FROM orders LIMIT 1) AS a")
-            check("a derived table whose count would DIFFER is refused", False, "it answered")
-        except Exception as e:                                      # noqa: BLE001
-            check("a derived table whose count would DIFFER is refused",
-                  "subqueries in FROM" in str(e), str(e).strip()[:110])
+        # ...and when the two counts would DIFFER, the answer is the DERIVED
+        # table's count, which is the correct one.
+        #
+        # This used to assert a REFUSAL. The translator flattened a derived
+        # table into the outer query, so a LIMIT inside would have been
+        # dropped and the count silently overstated — refusing was the only
+        # honest option it had. The evaluator actually evaluates the
+        # subquery, so there is nothing to flatten and nothing to refuse.
+        #
+        # Both spellings are asserted together, because the bug this guards
+        # against is the two agreeing when they should not.
+        check("a derived table's LIMIT is respected by the outer count",
+              q("SELECT count(*) FROM (SELECT _id FROM orders LIMIT 1) AS a") == [(1,)]
+              and q("SELECT count(*) FROM (SELECT _id FROM orders) AS a") == [(2,)],
+              str(q("SELECT count(*) FROM (SELECT _id FROM orders LIMIT 1) AS a")))
 
         # The engine refuses rather than guessing — asserted through the wire,
         # because an error that never reaches the client is not a boundary.
