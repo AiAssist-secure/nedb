@@ -135,5 +135,9 @@ jobs:
           # smoke test starts failing for reasons that have nothing to do
           # with the thing it is smoking.
           out=$(cargo run -q -p nesql-cli -- grammar --json)
-          echo "$out" | grep -Eo '"digest":"[0-9a-f]{64}"' \
+          # The JSON is pretty-printed, so there is a space after the colon.
+          # The first pattern assumed none and failed on every platform at
+          # once -- which is the giveaway that it was the checker that was
+          # wrong, not four operating systems.
+          echo "$out" | grep -Eo '"digest": *"[0-9a-f]{64}"' \
             || { echo "::error::grammar did not emit a 64-hex digest"; echo "$out"; exit 1; }
