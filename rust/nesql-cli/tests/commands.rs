@@ -244,13 +244,21 @@ fn constitution_checks_this_cli_against_this_engine() {
     assert_eq!(r.body["constitution_digest"].as_str().unwrap().len(), 64);
 }
 
+/// The four verbs are wired now, so what this pins is that none of them acts
+/// on a bare word. Each names an operation, and a command line that names
+/// none of them is refused rather than defaulted — `merge` with no subcommand
+/// must not quietly become `merge plan`.
 #[test]
-fn reserved_but_unimplemented_commands_refuse_rather_than_succeed() {
-    for word in ["diff", "tag", "branch", "merge"] {
-        let inv = parse(&[word]);
-        let r = cmd::dispatch_dbless(&inv.command).expect("answered from the binary");
-        assert_eq!(r.exit, Exit::Usage, "{} must not look like it did something", word);
-        assert_eq!(r.body["reserved"], true);
+fn a_bare_version_control_verb_names_no_operation_and_is_refused() {
+    for (word, hint) in [
+        ("diff", "two sequences"),
+        ("tag", "create, inspect, list, or delete"),
+        ("branch", "create, inspect, list, or abandon"),
+        ("merge", "plan, execute, or resolve"),
+    ] {
+        let argv = vec![word.to_string()];
+        let e = args::parse(&argv).expect_err("a bare verb must be refused");
+        assert!(e.0.contains(hint), "{} said {:?}", word, e.0);
     }
 }
 
@@ -485,10 +493,9 @@ fn branch_list_reports_what_is_pinning_history() {
                "the operator deciding whether to reclaim space must see this");
 
     cmd::branch::run(&db, &BranchCmd::Abandon { name: "x".into() });
-    assert!(cmd::branch::run(&db, &BranchCmd::List { include_all: false })
-        ["minimum_pinned_seq".to_string().as_str()].is_null()
-        || cmd::branch::run(&db, &BranchCmd::List { include_all: false })
-            .body["minimum_pinned_seq"].is_null());
+    let freed = cmd::branch::run(&db, &BranchCmd::List { include_all: false });
+    assert!(freed.body["minimum_pinned_seq"].is_null(),
+            "an abandoned branch pins nothing, so compaction is free again");
 }
 
 #[test]

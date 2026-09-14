@@ -1034,14 +1034,26 @@ mod tests {
     }
 
     #[test]
-    fn unwired_commands_parse_to_their_own_variant() {
-        for (word, want) in [
-            ("diff", NotWired::Diff),
-            ("tag", NotWired::Tag),
-            ("branch", NotWired::Branch),
-            ("merge", NotWired::Merge),
+    fn the_version_control_verbs_parse_to_their_own_commands() {
+        // These four used to be NotWired placeholders. They are wired now, so
+        // the test that pinned them as reserved becomes the test that pins
+        // what they parse to — and that each one REQUIRES its arguments
+        // rather than defaulting to something.
+        assert_eq!(cmd("diff 1 2"), Command::Diff(DiffArgs { from: 1, to: 2 }));
+        assert_eq!(cmd("tag list"), Command::Tag(TagCmd::List { include_deleted: false }));
+        assert_eq!(cmd("branch list"), Command::Branch(BranchCmd::List { include_all: false }));
+        assert_eq!(cmd("merge plan x"),
+                   Command::Merge(MergeCmd::Plan { branch: "x".into() }));
+
+        // A bare verb names no operation, so it is refused with its options.
+        for (word, hint) in [
+            ("diff", "two sequences"),
+            ("tag", "create, inspect, list, or delete"),
+            ("branch", "create, inspect, list, or abandon"),
+            ("merge", "plan, execute, or resolve"),
         ] {
-            assert_eq!(cmd(word), Command::NotWired(want));
+            let e = err(word);
+            assert!(e.contains(hint), "{} said {:?}", word, e);
         }
     }
 
@@ -1198,8 +1210,8 @@ mod tests {
     fn json_is_accepted_on_every_command_before_or_after_it() {
         for line in [
             "status", "log", "inspect users", "root create", "root inspect", "root verify",
-            "root list", "grammar", "constitution", "version", "query FROM users", "diff",
-            "tag", "branch", "merge", "help",
+            "root list", "grammar", "constitution", "version", "query FROM users",
+            "diff 1 2", "tag list", "branch list", "merge plan x", "help",
         ] {
             let after = format!("{} --json", line);
             assert!(p(&after).expect("--json after the command").json, "{}", after);
