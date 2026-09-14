@@ -273,7 +273,11 @@ fn every_command_renders_as_json_with_the_same_envelope() {
         Command::Root(RootCmd::List),
         Command::Grammar,
         Command::Version,
-        Command::Query("FROM orders".into()),
+        Command::Query { q: "FROM orders".into(), dialect: None },
+        // Both dialects go through the same renderer, so both belong in the
+        // JSON-purity sweep rather than just the routed default.
+        Command::Query { q: "FROM orders".into(), dialect: Some(args::Dialect::Nql) },
+        Command::Query { q: "SELECT 1".into(), dialect: Some(args::Dialect::Sql) },
     ];
     for c in cases {
         let r = cmd::dispatch(&c, &db, dir.path());

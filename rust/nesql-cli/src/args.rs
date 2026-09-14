@@ -122,6 +122,27 @@ pub enum NotWired {
     Merge,
 }
 
+/// Which half of neQL a statement is to be read as.
+///
+/// This lives here rather than in `cmd::query` because it is a COMMAND LINE
+/// concept: it records which dialect the user NAMED, and `None` means they
+/// named none and routing decides. `cmd::query` re-exports it, so the executor
+/// still refers to it as `query::Dialect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Nql,
+    Sql,
+}
+
+impl Dialect {
+    pub fn name(self) -> &'static str {
+        match self {
+            Dialect::Nql => "nql",
+            Dialect::Sql => "sql",
+        }
+    }
+}
+
 impl NotWired {
     pub fn name(self) -> &'static str {
         match self {
@@ -142,7 +163,7 @@ pub enum Command {
     Grammar,
     Constitution,
     Version,
-    Query(String),
+    Query { q: String, dialect: Option<Dialect> },
     Diff(DiffArgs),
     Tag(TagCmd),
     Branch(BranchCmd),
@@ -165,7 +186,7 @@ impl Command {
             Command::Grammar => "grammar",
             Command::Constitution => "constitution",
             Command::Version => "version",
-            Command::Query(_) => "query",
+            Command::Query { .. } => "query",
             Command::Diff(_) => "diff",
             Command::Tag(TagCmd::Create { .. }) => "tag create",
             Command::Tag(TagCmd::Inspect { .. }) => "tag inspect",
@@ -572,9 +593,33 @@ fn resolve(
         }
 
         "query" => {
-            no_flags("query", flags)?;
+            // `--nql` / `--sql` force a dialect instead of letting the leading
+            // keyword route. They were listed in `is_known_flag` and described
+            // in `cmd::query`, but this arm called `no_flags`, so both were
+            // refused with exit 2 -- a documented flag that could not be used,
+            // and `run_with` was consequently dead code. Accepted here now.
+            let force_nql = has_bare_flag(flags, "--nql");
+            let force_sql = has_bare_flag(flags, "--sql");
+            reject_unused(flags, &["--nql", "--sql"], "query")?;
+            // Naming both is not "last one wins". The rule is that intent
+            // resolution refuses ambiguity, and a caller who asked for both
+            // dialects has not told us which refusal they wanted to see.
+            let dialect = match (force_nql, force_sql) {
+                (true, true) => {
+                    return refuse(
+                        "query was given both --nql and --sql; name one dialect, \
+                         or neither to let the leading keyword decide",
+                    )
+                }
+                (true, false) => Some(Dialect::Nql),
+                (false, true) => Some(Dialect::Sql),
+                (false, false) => None,
+            };
             if words.is_empty() {
-                return refuse("query needs an NQL statement");
+                // neQL, not NQL: this command has accepted Postgres SQL since
+                // the pgwire merge, and an error naming only half the language
+                // sends the reader looking for the wrong syntax.
+                return refuse("query needs a neQL statement (NQL or Postgres SQL)");
             }
             // Multiple words are joined with single spaces, so both
             // `query "FROM users LIMIT 1"` and `query FROM users LIMIT 1`
@@ -582,7 +627,7 @@ fn resolve(
             // cannot change the statement's meaning — but a quoted string
             // literal containing runs of spaces would be reflowed, so the
             // one-argument form is the documented way to pass one.
-            Ok(Command::Query(words.join(" ")))
+            Ok(Command::Query { q: words.join(" "), dialect })
         }
 
         // ── diff ─────────────────────────────────────────────────────────
@@ -1013,11 +1058,44 @@ mod tests {
 
     #[test]
     fn query_takes_one_argument_or_many_words() {
-        assert_eq!(cmd("query FROM users"), Command::Query("FROM users".into()));
+        assert_eq!(
+            cmd("query FROM users"),
+            Command::Query { q: "FROM users".into(), dialect: None }
+        );
         let argv = vec!["query".to_string(), "FROM users LIMIT 1".to_string()];
         assert_eq!(
             parse(&argv).unwrap().command,
-            Command::Query("FROM users LIMIT 1".into())
+            Command::Query { q: "FROM users LIMIT 1".into(), dialect: None }
+        );
+    }
+
+    #[test]
+    fn a_forced_dialect_is_recorded_and_both_at_once_is_refused() {
+        assert_eq!(
+            cmd("query --nql FROM users"),
+            Command::Query { q: "FROM users".into(), dialect: Some(Dialect::Nql) }
+        );
+        assert_eq!(
+            cmd("query --sql SELECT 1"),
+            Command::Query { q: "SELECT 1".into(), dialect: Some(Dialect::Sql) }
+        );
+        // Both named: refused rather than last-one-wins, matching how
+        // `merge resolve` treats --ours with --theirs.
+        let e = err("query --nql --sql FROM users");
+        assert!(e.contains("--nql") && e.contains("--sql"), "{}", e);
+    }
+
+    #[test]
+    fn a_dialect_flag_after_a_double_dash_belongs_to_the_statement() {
+        // The `--` rule has to win over the new flags, or a query containing
+        // the literal text `--sql` becomes unrepresentable.
+        let argv: Vec<String> = ["query", "--", "FROM", "users", "--sql"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            parse(&argv).unwrap().command,
+            Command::Query { q: "FROM users --sql".into(), dialect: None }
         );
     }
 
@@ -1028,7 +1106,10 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let inv = parse(&argv).unwrap();
-        assert_eq!(inv.command, Command::Query("FROM users --json".into()));
+        assert_eq!(
+            inv.command,
+            Command::Query { q: "FROM users --json".into(), dialect: None }
+        );
         // The `--json` after `--` belonged to the query, not to the CLI.
         assert!(!inv.json);
     }
