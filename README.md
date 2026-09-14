@@ -1023,9 +1023,38 @@ curl -X POST :7070/v1/databases -d '{
     "links": [["users:u1","buys","orders:o1"]]
   }}'
 
-# Query (full NQL including time-travel and bi-temporal)
+# Query — the endpoint speaks neQL: SQL *or* NQL, routed on the first keyword
+curl -X POST :7070/v1/databases/shop/query \
+  -d '{"nql":"SELECT name FROM users WHERE status = '"'"'active'"'"' ORDER BY name"}'
+# → {"rows":[{"name":"Alice"}],"count":1,"dialect":"sql", ...}
+
 curl -X POST :7070/v1/databases/shop/query \
   -d '{"nql":"FROM users WHERE status = \"active\" ORDER BY name ASC"}'
+# → {"rows":[...],"count":1,"dialect":"nql", ...}
+
+
+**The field is still called `nql`, and its contents no longer have to be.** This
+endpoint accepts **neQL** — NQL *or* PostgreSQL SQL — and answers with the
+`dialect` it chose. The name is unchanged because every existing HTTP client
+sends it; renaming would break them to gain nothing. Old NQL clients are
+unaffected.
+
+Routing is **structural, not guessed**. NQL statements begin `FROM`; PostgreSQL
+has no statement form that begins with `FROM`, so the leading keyword partitions
+the two vocabularies rather than hinting at them. A first word in neither is
+refused *naming both* — never handed to whichever parser seems likelier.
+
+```bash
+curl -X POST :7070/v1/databases/shop/query -d '{"nql":"GRANT ALL ON users"}'
+# → 400  "GRANT" does not begin a statement in either half of neQL
+#          NQL statements begin with: FROM
+#          SQL statements begin with: SELECT, INSERT, UPDATE, ...
+```
+
+It is the **same router** `nesql query` uses — `nedb_engine::neql::route`, which
+the CLI re-exports rather than copies. Two implementations of that decision
+would let the daemon and the CLI disagree about what a statement *means*, which
+is worse than disagreeing about a result: nothing looks broken when it happens.
 
 # Verify the hash chain
 curl :7070/v1/databases/shop/verify

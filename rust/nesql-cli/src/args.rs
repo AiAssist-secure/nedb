@@ -124,24 +124,12 @@ pub enum NotWired {
 
 /// Which half of neQL a statement is to be read as.
 ///
-/// This lives here rather than in `cmd::query` because it is a COMMAND LINE
-/// concept: it records which dialect the user NAMED, and `None` means they
-/// named none and routing decides. `cmd::query` re-exports it, so the executor
-/// still refers to it as `query::Dialect`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    Nql,
-    Sql,
-}
-
-impl Dialect {
-    pub fn name(self) -> &'static str {
-        match self {
-            Dialect::Nql => "nql",
-            Dialect::Sql => "sql",
-        }
-    }
-}
+/// Re-exported from the ENGINE rather than defined here. It lived in this
+/// crate first, and then `POST /query` needed the same decision — at which
+/// point keeping a copy would have meant the daemon and the CLI could drift
+/// about what a statement MEANS, which is worse than drifting about a result
+/// because nothing looks broken when it happens.
+pub use nedb_engine::neql::Dialect;
 
 impl NotWired {
     pub fn name(self) -> &'static str {
