@@ -52,43 +52,14 @@ use crate::out::{Exit, Report};
 /// referring to it as `query::Dialect`.
 pub use crate::args::Dialect;
 
-/// Statement-initial keywords, per dialect. Disjoint by construction; the test
-/// `the_two_vocabularies_do_not_overlap` holds them that way.
-const NQL_HEADS: &[&str] = &["FROM"];
-const SQL_HEADS: &[&str] = &[
-    "SELECT", "INSERT", "UPDATE", "DELETE", "EXPLAIN", "WITH", "SHOW", "SET",
-    "VALUES", "TABLE", "BEGIN", "COMMIT", "ROLLBACK",
-];
-
-fn first_word(s: &str) -> Option<String> {
-    s.split_whitespace()
-        .next()
-        // A statement may open with a parenthesis — `(SELECT …) UNION …`.
-        .map(|w| w.trim_start_matches('(').trim_end_matches(';').to_uppercase())
-        .filter(|w| !w.is_empty())
-}
-
-/// Decide which dialect a statement is written in, or refuse.
-pub fn route(q: &str) -> Result<Dialect, String> {
-    let Some(head) = first_word(q) else {
-        return Err("the statement is empty".to_string());
-    };
-    if NQL_HEADS.contains(&head.as_str()) {
-        return Ok(Dialect::Nql);
-    }
-    if SQL_HEADS.contains(&head.as_str()) {
-        return Ok(Dialect::Sql);
-    }
-    Err(format!(
-        "{:?} does not begin a statement in either half of neQL\n  \
-         NQL statements begin with: {}\n  \
-         SQL statements begin with: {}\n\
-         (force a dialect with --nql or --sql to get that dialect's own error)",
-        head,
-        NQL_HEADS.join(", "),
-        SQL_HEADS.join(", "),
-    ))
-}
+/// Routing is the ENGINE's decision, not this crate's.
+///
+/// `NQL_HEADS`, `SQL_HEADS` and `route` used to live here. They moved to
+/// `nedb_engine::neql` when the HTTP endpoint needed the same routing, so
+/// that a statement means the same thing whether it arrives through `nesql
+/// query` or through `POST /query`. Re-exported so this module's tests and
+/// callers are unchanged.
+pub use nedb_engine::neql::{route, NQL_HEADS, SQL_HEADS};
 
 pub fn run(db: &Arc<Db>, q: &str) -> Report {
     run_with(db, q, None)
