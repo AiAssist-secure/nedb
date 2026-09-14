@@ -463,17 +463,22 @@ if nedb.__has_native__:
             now = q("FROM t")
             check(f"[{label}] a delete still deletes",
                   [r["_id"] for r in now] == ["keep"], str([r["_id"] for r in now]))
-            at0 = q("FROM t AS OF 0")
+            # The first USER write is not at sequence 0: registering a
+            # collection is itself a write, in BOTH engines. Discover where
+            # `t` begins instead of assuming, so these keep testing what they
+            # are named for — that a delete does not erase history.
+            base = next((n for n in range(0, 16) if q(f"FROM t AS OF {n}")), 0)
+            at0 = q(f"FROM t AS OF {base}")
             check(f"[{label}] AS OF 0 — the ORIGINAL value survives the delete",
                   [r.get("t") for r in at0] == [55], str(at0))
-            at1 = [r for r in q("FROM t AS OF 1") if r["_id"] == "a"]
+            at1 = [r for r in q(f"FROM t AS OF {base + 1}") if r["_id"] == "a"]
             check(f"[{label}] AS OF 1 — the UPDATED value survives the delete",
                   [r.get("t") for r in at1] == [66], str(at1))
-            at3 = [r for r in q("FROM t AS OF 3") if r["_id"] == "a"]
+            at3 = [r for r in q(f"FROM t AS OF {base + 3}") if r["_id"] == "a"]
             check(f"[{label}] AS OF at/after the tombstone reports it absent",
                   at3 == [], str(at3))
             check(f"[{label}] the tombstone is never surfaced as a document",
-                  all("_deleted" not in r for s in range(5)
+                  all("_deleted" not in r for s in range(base, base + 5)
                       for r in q(f"FROM t AS OF {s}")),
                   "a _deleted field would look like a real document")
 
