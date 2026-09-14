@@ -114,7 +114,7 @@ pub fn dispatch(command: &Command, db: &Arc<Db>, path: &Path) -> Report {
         Command::Root(RootCmd::Verify { at }) => root::verify(db, *at),
         Command::Root(RootCmd::List) => root::list(db),
         Command::Constitution => constitution::run(db),
-        Command::Query(q) => query::run(db, q),
+        Command::Query { q, dialect } => query::run_with(db, q, *dialect),
         Command::Diff(DiffArgs { from, to }) => diff::run(db, *from, *to),
         Command::Tag(t) => tag::run(db, t),
         Command::Branch(b) => branch::run(db, b),

@@ -46,20 +46,11 @@ use serde_json::{json, Value};
 use crate::out::{Exit, Report};
 
 /// Which language a statement is written in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    Nql,
-    Sql,
-}
-
-impl Dialect {
-    pub fn name(self) -> &'static str {
-        match self {
-            Dialect::Nql => "nql",
-            Dialect::Sql => "sql",
-        }
-    }
-}
+///
+/// Defined in `args`, because which dialect was named is a property of the
+/// command line. Re-exported here so this module's callers and tests keep
+/// referring to it as `query::Dialect`.
+pub use crate::args::Dialect;
 
 /// Statement-initial keywords, per dialect. Disjoint by construction; the test
 /// `the_two_vocabularies_do_not_overlap` holds them that way.
