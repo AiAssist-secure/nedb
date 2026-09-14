@@ -31,28 +31,123 @@ One Rust core → ships to **PyPI** and **npm** from a single source.
 
 ---
 
-## What's next — [neSQL](https://github.com/Eth-Interchained/neSQL)
+## [neSQL](https://github.com/Eth-Interchained/neSQL) — the language this engine speaks
 
-Nobody should have to learn a query language to use a database. NEDB's PostgreSQL
-endpoint already answers `psql`, SQLAlchemy Core **and** ORM, asyncpg and
-node-postgres against a live store — but it gets there by *translating* SQL into
+Nobody should have to learn a query language to use a database. That sentence cost
+us one.
+
+NEDB's PostgreSQL endpoint answers `psql`, SQLAlchemy Core **and** ORM, asyncpg and
+node-postgres against a live store. It used to get there by *translating* SQL into
 NQL, and a translation can only reach as far as the target language's shape.
 
-**[neSQL](https://github.com/Eth-Interchained/neSQL)** removes the translation.
-PostgreSQL's real grammar (`gram.y`, 19,513 lines, 492 keywords, vendored from
-17.4 at [`vendor/postgresql/`](vendor/postgresql/) with its licence intact),
-extended with NEDB's temporal and causal clauses. **Two front-ends, one plan.
-NQL folded in, not deleted.**
+**neSQL is the name for what replaced that.** PostgreSQL's real grammar (`gram.y`,
+19,513 lines, 492 keywords, vendored from 17.4 at
+[`vendor/postgresql/`](vendor/postgresql/) with its licence intact), extended with
+NEDB's temporal and causal clauses. **Two front-ends, one plan. NQL folded in, not
+deleted.**
+
+**neQL** is the name for the pair — NQL *and* PostgreSQL SQL, one language with two
+halves. Which half a statement is read as is decided **structurally**, not guessed:
+NQL statements begin `FROM`, and PostgreSQL has no statement form that begins with
+`FROM`, so the leading keyword partitions the two vocabularies rather than hinting
+at them. A first word in neither is refused *naming both*.
+
+This section is not a roadmap. Everything below ships in this release — the
+evaluator with no flag to set, the `nesql` CLI likewise.
 
 [![neSQL on PyPI](https://img.shields.io/pypi/v/nesql?label=nesql%20·%20PyPI&color=a855f7)](https://pypi.org/project/nesql/)
 [![neSQL on crates.io](https://img.shields.io/crates/v/nesql?label=nesql%20·%20crates.io&color=a855f7)](https://crates.io/crates/nesql)
 [![neSQL on npm](https://img.shields.io/npm/v/nesql-engine?label=nesql-engine%20·%20npm&color=a855f7)](https://www.npmjs.com/package/nesql-engine)
 
-### Available now, opt-in: `NEDBD_SQL_ENGINE=1`
+Those three badges read **0.0.1** next to an engine at 6.1.0, and that is
+deliberate rather than neglected. They are **reserved names**: each package loads,
+reports the vendored PostgreSQL release, and answers `is_release() == false`,
+because a package that imports cleanly and then lies is worse than one that is not
+published. The engine you actually install is `nedb-engine`. The
+[neSQL repository](https://github.com/Eth-Interchained/neSQL) holds the language —
+both halves of the grammar and the CLI's source, side by side.
 
-The SQL engine is in this release and it is **off by default**. Turn it on and a
-user collection is answered by a real SQL evaluator instead of a translation —
-every one of these works, and every one is refused *by name* without it:
+### `nesql` — the CLI, and it speaks neQL
+
+Ships in this release, no flag. `nesql` opens a store directly — no daemon, no
+port — and answers both halves of the language through **one** `query` command:
+
+```console
+$ nesql --db ./store query "SELECT who, total FROM orders ORDER BY total DESC"
+{"who":"globex","total":250,...}
+{"who":"acme","total":100,...}
+(2 rows)
+
+$ nesql --db ./store query "FROM orders WHERE total > 150"
+{"who":"globex","total":250,...}
+(1 rows, 1 scanned)
+```
+
+Same command, two dialects, routed on the leading keyword. `--nql` / `--sql`
+force one when you want *that dialect's* error rather than a routing error —
+`query --nql "SELECT 1"` tells you `expected keyword FROM`, which is the useful
+answer when you are debugging why something was rejected.
+
+It is built for scripts as much as for people. `--json` emits exactly one JSON
+object on stdout — engine diagnostics go to stderr, so a pipe stays clean — and
+the exit code carries the verdict:
+
+| | |
+| --- | --- |
+| `0` | success — the thing was done, or the check ran and passed |
+| `1` | failure — the operation ran and did not succeed |
+| `2` | usage — the command line was not understood, or was ambiguous |
+| `3` | **could not determine** — the check could not run (history pruned) |
+| `4` | not found |
+| `5` | unsupported — a version or format this build does not know |
+
+**`3` is the one that matters.** A pruned history is not a corrupt one, and an
+operator who cannot tell those apart will either ignore a real alarm or panic at
+a routine one. `root verify` reports the stored record and the recomputation as
+two independent facts and never collapses them:
+
+```console
+$ nesql --db ./store root verify
+at_seq         2
+root_record    valid
+recomputation  matches
+exit           0
+```
+
+`root_record valid` / `recomputation unavailable` with exit 3 is a pruned store
+answering honestly. Only `recomputation DIFFERS` means something is wrong.
+
+The rest of the surface: `status`, `log`, `inspect` (a collection, a document, a
+sequence, or a persisted root — named by kind, because a bare `42` could be
+`seq:42` or `root:42` and the CLI refuses to pick), `diff`, immutable `tag`,
+`branch`, `merge` with first-class conflicts, and `grammar` / `constitution`,
+which publish the command surface and the engine's guarantees with digests you
+can compare across builds.
+
+```console
+$ nesql constitution
+engine         6.1.0
+nesql          6.1.0
+verdict        compatible with gaps
+nql grammar    ef0f1696...  (agrees — same grammar this build compiled against)
+```
+
+### One evaluator, no flag
+
+The SQL evaluator answers **every `SELECT` it can parse** — user collections
+included, with nothing to turn on. `NEDBD_SQL_ENGINE` is gone; a deployment
+still exporting it is told the variable is inert rather than left believing it
+holds a switch.
+
+It used to be opt-in, and the honest reason it is not any more is that the two
+sides were never two correct answers. `SELECT who FROM orders` returned
+`who, total, _id, _hash, _seq, _coll` on the translator, because NQL has no
+projection to translate a column list into. A flag whose positions give
+different answers to the same correct SQL is not a parity switch.
+
+What did not change is the fallthrough, which was never the flag: a statement
+the evaluator cannot **parse** still goes to the translator, and that is how
+every write is served.
 
 ```sql
 SELECT o._id, d.name FROM orders o JOIN drivers d ON o.driver = d._id;
@@ -91,11 +186,10 @@ the other. `AS OF SYSTEM TIME`, `VALID AS OF` and `SEARCH` are **unreserved
 keywords**: a collection aliased `search`, or a column named `valid`, keeps
 working exactly as before.
 
-**Why it is opt-in rather than the default**, stated plainly because the reason
-is the interesting part. A parity harness runs the same corpus through both
-engines and asserts identical answers — 44 checks, in CI, and it is what earns
-the flag being flipped rather than a benchmark. It already found two real
-divergences: `SELECT *` returned its columns in a different order on each
+**What earned the flag's removal**, stated plainly because the reason is the
+interesting part. A parity harness runs the same corpus through both paths and
+asserts identical answers — 44 checks, in CI — and it is that, rather than a
+benchmark, that earned it. It found two real divergences: `SELECT *` returned its columns in a different order on each
 engine, and the SQL evaluator built its column list from the **first row alone**,
 so a field only later documents carried silently did not appear at all.
 
@@ -260,7 +354,7 @@ all the work in this sentence. Every refusal below traces to the same cause:
 NQL is the engine's native language, so SQL has to be rewritten into it, and a
 rewrite can only ever reach as far as the target language's shape.
 
-| Supported on the default path | Refused there, with the reason | `NEDBD_SQL_ENGINE=1` |
+| Expressible in NQL | Not expressible there, and why | the evaluator |
 | --- | --- | --- |
 | `*`, a column list, `COUNT(*)`, `SUM`/`AVG`/`MIN`/`MAX(col)` | `JOIN` — NQL is single-collection | ✅ **works** (nested-loop + hash) |
 | `WHERE` — the whole NQL predicate surface | subqueries, `UNION`, window functions | ✅ **subqueries, `EXISTS`, `UNION`/`INTERSECT`/`EXCEPT` work**; window functions arrive with the grammar |
@@ -286,7 +380,7 @@ to them. Those answers do not change.
 > nested-loop and hash joins, subqueries, `EXISTS`, quantified comparisons, set
 > operations, `array_agg(x ORDER BY y)` and derived tables for some time — they
 > were simply unreachable *through a translator*, because the translator's
-> target was NQL. Set `NEDBD_SQL_ENGINE=1` and they are reachable.
+> target was NQL. They are reachable now, with nothing to set.
 >
 > neSQL vendors PostgreSQL's **real grammar** — `gram.y`, 19,513 lines and 492
 > keywords, from 17.4, licence intact — and extends it with the clauses NEDB

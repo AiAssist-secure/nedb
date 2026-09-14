@@ -3105,12 +3105,101 @@ fn catalog_name(n: &str) -> String {
 /// evaluator's grammar cannot parse (`TRACE`, `SEARCH`, `VALID AS OF`,
 /// `TRAVERSE`, every write) still falls through to the translator on its own,
 /// because `parse` fails and this function is never consulted.
-fn sql_engine_for_collections() -> bool {
+/// NQL's table-level verbs, gathered per relation name.
+///
+/// A struct rather than the tuple this started as. It held
+/// `(valid_as_of, search)`; adding `TRACE` and `TRAVERSE` would have made it a
+/// four-tuple indexed by `.0` through `.3`, and the resolver reads these in a
+/// different order than it builds them — which is precisely how a positional
+/// tuple turns into `SEARCH` being rendered where `VALID AS OF` was meant.
+#[derive(Default, Clone)]
+struct TableVerbs {
+    valid_as_of: Option<String>,
+    search: Option<String>,
+    /// The edge type for `TRACE <edge>`.
+    trace: Option<String>,
+    /// `REVERSE` — walk effects rather than causes.
+    trace_reverse: bool,
+    /// The relation name for `TRAVERSE <rel>`.
+    traverse: Option<String>,
+}
+
+impl TableVerbs {
+    /// Does this relation carry any verb the catalogue cannot answer?
+    fn first_unsupported_on_catalogue(&self) -> Option<&'static str> {
+        if self.valid_as_of.is_some() {
+            Some("VALID AS OF")
+        } else if self.search.is_some() {
+            Some("SEARCH")
+        } else if self.trace.is_some() {
+            Some("TRACE")
+        } else if self.traverse.is_some() {
+            Some("TRAVERSE")
+        } else {
+            None
+        }
+    }
+
+}
+
+/// Whether `NEDBD_SQL_ENGINE` is still set in someone's environment.
+///
+/// The flag no longer selects anything — the evaluator answers every SELECT it
+/// can parse. It is read only so a deployment that still exports it is TOLD
+/// the variable is now inert, rather than left believing it is holding a
+/// switch that no longer exists. Silence here is how an operator ends up
+/// certain their reads are on the old path.
+fn stale_sql_engine_flag() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("NEDBD_SQL_ENGINE").as_deref(), Ok("1") | Ok("true") | Ok("on"))
+        let set = std::env::var("NEDBD_SQL_ENGINE").is_ok();
+        if set {
+            eprintln!(
+                "[nedbd] NEDBD_SQL_ENGINE is set but no longer does anything. The SQL \
+                 evaluator now answers every SELECT it can parse; statements it cannot \
+                 parse still fall through to the translator. You can remove the variable."
+            );
+        }
+        set
     })
+}
+
+/// The pre-filtered scan, still spelled in NQL.
+///
+/// The LAST place a relation is expressed as text, and it survives for a
+/// reason that does not apply to the others: the pre-filter is an
+/// OPTIMISATION. `sqlpush` renders the part of the `WHERE` that NQL evaluates
+/// identically, so pushing it saves reading rows — and the evaluator's real
+/// `WHERE` runs above regardless, so getting it wrong costs a wasted row and
+/// never an answer. Everything else about the scan is a MEANING, and meanings
+/// now travel as a `relation::Scan` that cannot drop a field.
+///
+/// Derived FROM that same struct rather than from the original clauses, so the
+/// two cannot disagree about what is being read. When the index scan learns to
+/// take a predicate directly, this function and NQL's parser go together.
+fn compose_prefiltered(cname: &str, scan: &crate::relation::Scan, pre: &str) -> String {
+    let mut q = format!("FROM {}", cname);
+    if let Some(seq) = scan.as_of {
+        q.push_str(&format!(" AS OF {}", seq));
+    }
+    if let Some(d) = &scan.valid_as_of {
+        q.push_str(&format!(" VALID AS OF {}", nql_string(d)));
+    }
+    q.push_str(&format!(" WHERE {}", pre));
+    if let Some(t) = &scan.search {
+        q.push_str(&format!(" SEARCH {}", nql_string(t)));
+    }
+    if let Some(edge) = &scan.trace {
+        q.push_str(&format!(" TRACE {}", edge));
+        if scan.trace_reverse {
+            q.push_str(" REVERSE");
+        }
+    }
+    if let Some(rel) = &scan.traverse {
+        q.push_str(&format!(" TRAVERSE {}", rel));
+    }
+    q
 }
 
 fn sql_engine_owns(sql: &str) -> bool {
@@ -3122,12 +3211,78 @@ fn sql_engine_owns(sql: &str) -> bool {
     if touched.iter().any(|t| crate::pgcatalog::is_catalog(&catalog_name(t))) {
         return true;
     }
-    // A user collection reaches the evaluator only when asked for. Note the
-    // asymmetry with the line above: a catalogue relation has always been the
-    // evaluator's because the translator cannot serve it at all, whereas a
-    // collection has a working answer on both paths — so the choice between
-    // them is a judgement about parity, not about capability.
-    sql_engine_for_collections()
+    // A user collection reaches the evaluator too, unconditionally. There is
+    // ONE evaluator now.
+    //
+    // This used to return `sql_engine_for_collections()` — an env flag,
+    // default OFF, on the argument that a collection "has a working answer on
+    // both paths, so the choice between them is a judgement about parity".
+    // That argument stopped being true. The translator's answer is not a
+    // second correct answer, it is a worse one:
+    //
+    //   SELECT who FROM orders        translator -> who, total, _id, _hash,
+    //                                                _seq, _coll
+    //                                 evaluator  -> who
+    //
+    // The projection list was ignored entirely, because NQL has no projection
+    // to translate it into. `sum(total), avg(total)` in one grouped row is not
+    // slow on the translator, it is unrepresentable. A flag whose two
+    // positions give different answers to the same correct SQL is not a
+    // parity switch, it is a bug with a toggle.
+    //
+    // What made this safe to flip is that the fallthrough was never the flag.
+    // A statement this evaluator cannot PARSE never reaches here — `parse`
+    // fails at the top of this function and the translator takes it, which is
+    // still how every write, and anything outside the SELECT grammar, is
+    // served. Removing the flag narrows nothing; it stops answering parseable
+    // SQL with a translation of it.
+    //
+    // Called here only for its one-shot warning: this is the first point at
+    // which a deployment still exporting the variable is demonstrably running
+    // the evaluator, which is exactly when saying so is useful.
+    let _ = stale_sql_engine_flag();
+
+    // The translator has not gone anywhere. It still answers every write and
+    // every statement this evaluator cannot parse, so the two paths still
+    // coexist and still have to agree where both can answer. That agreement is
+    // proven by tests/test_pgwire_parity.py, which spawns two daemons and
+    // compares them — and which became a TAUTOLOGY the moment the flag it used
+    // to tell them apart stopped selecting anything. Its own header warned
+    // about exactly this failure, from the environment side; this is the same
+    // failure from the code side.
+    //
+    // So the lever survives for the harness, under a name no one will mistake
+    // for a product switch, and pointed the other way: it forces the
+    // TRANSLATOR rather than enabling the evaluator. Nothing in the product
+    // reads it, the default path has no flag in it at all, and a parity run
+    // that forgets to set it compares the evaluator with itself and is
+    // supposed to look wrong.
+    !force_translator_for_parity()
+}
+
+/// TEST-ONLY. Forces user collections back onto the translator.
+///
+/// Not a supported configuration and not a fallback: it exists so
+/// `test_pgwire_parity.py` can still put a translator daemon next to an
+/// evaluator daemon now that `NEDBD_SQL_ENGINE` selects nothing. Setting it in
+/// production gives you the projection-dropping answers this change removed.
+fn force_translator_for_parity() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = matches!(
+            std::env::var("NEDB_PARITY_FORCE_TRANSLATOR").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        );
+        if on {
+            eprintln!(
+                "[nedbd] NEDB_PARITY_FORCE_TRANSLATOR is set — user collections are being \
+                 answered by the TRANSLATOR. This is a test lever for the parity harness, \
+                 not a supported configuration: projections are dropped on this path."
+            );
+        }
+        on
+    })
 }
 
 /// Run a `SELECT` through the full SQL engine when it touches the catalogue.
@@ -3256,15 +3411,24 @@ fn try_catalog_select(
     // verdict for the same reason: two different values for one scan is
     // REFUSED, because silently picking one would answer a different question
     // than the one asked and look like it worked.
-    let nql_verbs: std::collections::HashMap<String, (Option<String>, Option<String>)> = {
-        let mut out: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+    let nql_verbs: std::collections::HashMap<String, TableVerbs> = {
+        let mut out: std::collections::HashMap<String, TableVerbs> =
             std::collections::HashMap::new();
         for t in sel.from.iter().chain(sel.joins.iter().map(|j| &j.table)) {
             let k = catalog_name(&t.name).to_ascii_lowercase();
             let e = out.entry(k.clone()).or_default();
+            // REVERSE rides with the edge type rather than being reconciled on
+            // its own: `TRACE caused_by` and `TRACE caused_by REVERSE` are two
+            // different questions about the same edge, and reconciling the
+            // direction separately would let them merge into one scan.
+            if t.trace.is_some() {
+                e.trace_reverse = t.trace_reverse;
+            }
             for (slot, incoming, verb) in [
-                (&mut e.0, &t.valid_as_of, "VALID AS OF"),
-                (&mut e.1, &t.search, "SEARCH"),
+                (&mut e.valid_as_of, &t.valid_as_of, "VALID AS OF"),
+                (&mut e.search, &t.search, "SEARCH"),
+                (&mut e.trace, &t.trace, "TRACE"),
+                (&mut e.traverse, &t.traverse, "TRAVERSE"),
             ] {
                 match (slot.as_deref(), incoming.as_deref()) {
                     (Some(a), Some(b)) if a != b => {
@@ -3326,11 +3490,7 @@ fn try_catalog_select(
             let bad = if temporal.contains_key(&k) {
                 Some("AS OF SYSTEM TIME")
             } else {
-                match nql_verbs.get(&k) {
-                    Some((Some(_), _)) => Some("VALID AS OF"),
-                    Some((_, Some(_))) => Some("SEARCH"),
-                    _ => None,
-                }
+                nql_verbs.get(&k).and_then(|v| v.first_unsupported_on_catalogue())
             };
             if let Some(clause) = bad {
                 if crate::pgcatalog::is_catalog(&cname) {
@@ -3380,50 +3540,57 @@ fn try_catalog_select(
         // whole mechanism behind "NQL folded into neSQL" — the SQL side parses
         // the verbs and composes joins and subqueries around them, while the
         // NQL engine remains the one implementation that executes them.
-        let nql = {
-            let mut q = format!("FROM {}", cname);
-            if let Some(seq) = temporal.get(&key) {
-                q.push_str(&format!(" AS OF {}", seq));
-            }
-            if let Some(d) = nql_verbs.get(&key).and_then(|v| v.0.as_deref()) {
-                q.push_str(&format!(" VALID AS OF {}", nql_string(d)));
-            }
-            if let Some(p) = pre {
-                q.push_str(&format!(" WHERE {}", p));
-            }
-            if let Some(t) = nql_verbs.get(&key).and_then(|v| v.1.as_deref()) {
-                q.push_str(&format!(" SEARCH {}", nql_string(t)));
-            }
-            q
+        // Built once, parameterised by whether the pre-filter is included, so
+        // the retry below cannot diverge from the real query by forgetting a
+        // clause.
+        //
+        // It previously did. The retry was hand-rolled as
+        //     FROM <coll> [AS OF <seq>]
+        // on the stated grounds that "the fallback drops the PRE-FILTER, which
+        // is free". Dropping the pre-filter IS free -- the full WHERE runs
+        // above. But that string also dropped VALID AS OF and SEARCH, which
+        // are not free and have no equivalent up there: the retry answered
+        // with rows nobody asked about and looked like it worked. The AS OF
+        // case had already been found and special-cased; the other two were
+        // the same bug standing next to it.
+        let Some(db) = db else { return Ok(None) };
+
+        // The scan as DATA. No string is built and none is parsed: the
+        // qualifiers go to the store as fields.
+        //
+        // This replaced `crate::nql::query(db, &compose(true))`, which
+        // rendered `FROM coll AS OF n VALID AS OF '...' WHERE ... SEARCH '...'`
+        // into text and handed it back to the NQL parser. That was a
+        // translation living inside the thing built to stop translating, and
+        // it failed the same way translations do: the retry path composed its
+        // own shorter string and dropped two clauses, and `SEARCH 'o''brien'`
+        // was a quoting question rather than a value.
+        let verbs = nql_verbs.get(&key);
+        let scan = crate::relation::Scan {
+            coll: cname.to_string(),
+            as_of: temporal.get(&key).copied(),
+            valid_as_of: verbs.and_then(|v| v.valid_as_of.clone()),
+            search: verbs.and_then(|v| v.search.clone()),
+            trace: verbs.and_then(|v| v.trace.clone()),
+            trace_reverse: verbs.map(|v| v.trace_reverse).unwrap_or(false),
+            traverse: verbs.and_then(|v| v.traverse.clone()),
+            trace_limit: crate::relation::DEFAULT_TRACE_LIMIT,
         };
-        match db {
-            Some(db) => match crate::nql::query(db, &nql) {
-                Ok((rows, _)) => Ok(Some(crate::sqlselect::from_vec(rows))),
-                // A pre-filter that NQL refuses must not fail the statement:
-                // it is an optimisation, so the honest fallback is the
-                // unfiltered scan the query would have done anyway. Silently
-                // returning None here would turn a slow-but-correct query into
-                // "relation does not exist".
-                Err(_) if pre.is_some() => {
-                    // The fallback drops the PRE-FILTER, which is free, and
-                    // must keep the AS OF, which is not: falling back to the
-                    // tip would answer a historical question with current
-                    // data. That is the silent-wrong-answer shape this engine
-                    // keeps getting bitten by, so the sequence travels with
-                    // the retry.
-                    let bare = match temporal.get(&key) {
-                        Some(seq) => format!("FROM {} AS OF {}", cname, seq),
-                        None => format!("FROM {}", cname),
-                    };
-                    match crate::nql::query(db, &bare) {
-                        Ok((rows, _)) => Ok(Some(crate::sqlselect::from_vec(rows))),
-                        Err(_) => Ok(None),
-                    }
-                }
-                Err(_) => Ok(None),
-            },
-            None => Ok(None),
+
+        // The pre-filter is the one part still expressed in NQL, because it is
+        // the one part that is an OPTIMISATION rather than a meaning: the full
+        // `WHERE` runs in the evaluator above regardless, so a pre-filter can
+        // only ever save a row, never change an answer. When NQL declines it,
+        // the scan simply happens unfiltered — which is what the query would
+        // have done anyway, and no clause is lost with it because the scan is
+        // a struct and the struct does not change.
+        if let Some(p) = pre {
+            let filtered = compose_prefiltered(&cname, &scan, p);
+            if let Ok((rows, _)) = crate::nql::query(db, &filtered) {
+                return Ok(Some(crate::sqlselect::from_vec(rows)));
+            }
         }
+        Ok(Some(crate::sqlselect::from_vec(crate::relation::read_json(db, &scan))))
     };
 
     let (cols, rows, plan) = crate::sqlselect::execute_explain(

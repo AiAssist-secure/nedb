@@ -425,12 +425,31 @@ pub struct TableRef {
     /// Per-table like the others, which is the point: one relation searched
     /// and another joined to it is a sentence SQL can now say.
     pub search: Option<String>,
+    /// `FROM orders TRACE caused_by [REVERSE]` — the causal chain that produced
+    /// each row, walked over `caused_by` edges.
+    ///
+    /// The last two NQL verbs to arrive here, and the reason they were last is
+    /// that they are the two that CHANGE THE ROW SET rather than filter it: a
+    /// trace replaces each row with its chain. That is also why they belong on
+    /// the table rather than in the `WHERE` — the transform happens as the
+    /// relation is produced, and everything SQL does (join, subquery, set
+    /// operation, aggregate) then composes around the traced relation.
+    ///
+    /// Unreserved, by the same discipline as `SEARCH` and `VALID`: `TRACE`
+    /// starts a clause only when an identifier follows it, so `FROM orders
+    /// trace` still aliases the relation `trace`.
+    pub trace: Option<String>,
+    /// `REVERSE` on the trace — walk effects instead of causes.
+    pub trace_reverse: bool,
+    /// `FROM orders TRAVERSE ships_to` — one hop along a named relation,
+    /// replacing each row with its neighbours.
+    pub traverse: Option<String>,
 }
 
 impl TableRef {
     /// A plain named relation.
     pub fn named(name: impl Into<String>, alias: Option<String>) -> Self {
-        TableRef { name: name.into(), alias, sub: None, args: None, col_aliases: vec![], lateral: false, as_of: None, valid_as_of: None, search: None }
+        TableRef { name: name.into(), alias, sub: None, args: None, col_aliases: vec![], lateral: false, as_of: None, valid_as_of: None, search: None, trace: None, trace_reverse: false, traverse: None }
     }
 
     /// How this table's columns are addressed: the alias when given, else the
@@ -1250,6 +1269,11 @@ impl Parser {
                 args: None,
                 col_aliases,
                 lateral,
+                // A subquery carries no table-level qualifiers: it is already a
+                // relation, and anything temporal or causal was said inside it.
+                trace: None,
+                trace_reverse: false,
+                traverse: None,
                 as_of: None,
                 valid_as_of: None,
                 search: None,
@@ -1289,7 +1313,7 @@ impl Parser {
             }
             let fname = name.rsplit('.').next().unwrap_or(&name).to_lowercase();
             let (alias, col_aliases) = self.parse_table_alias()?;
-            return Ok(TableRef { name: fname, alias, sub: None, args: Some(args), col_aliases, lateral: false, as_of: None, valid_as_of: None, search: None });
+            return Ok(TableRef { name: fname, alias, sub: None, args: Some(args), col_aliases, lateral: false, as_of: None, valid_as_of: None, search: None, trace: None, trace_reverse: false, traverse: None });
         }
 
         // `AS OF SYSTEM TIME <seq>` is read BEFORE the alias, because `AS` is
@@ -1361,8 +1385,58 @@ impl Parser {
             None
         };
 
+        // `TRACE <edge> [REVERSE]` and `TRAVERSE <rel>`, on the same terms as
+        // the three above. The lookahead requires an IDENTIFIER, which is what
+        // keeps both unreserved: `FROM orders trace` is still a relation
+        // aliased `trace`, because no identifier follows it.
+        // A name, for the purposes of the lookahead: a bare word that does not
+        // start the next clause, or a quoted identifier. Keywords are `Word`s
+        // too, so testing for "a word follows" is not enough — `FROM orders
+        // TRACE WHERE x = 1` would take `WHERE` as the edge type. This is the
+        // same test `parse_table_alias` makes, for the same reason.
+        fn names_a_thing(t: &Tok) -> bool {
+            match t {
+                Tok::Word { upper, .. } => !is_clause_keyword(upper),
+                Tok::Quoted(_) => true,
+                _ => false,
+            }
+        }
+
+        let (trace, trace_reverse) = if self.peek().is_kw("TRACE")
+            && names_a_thing(self.peek_at(1))
+        {
+            self.next();
+            let edge = match self.next() {
+                Tok::Word { raw, .. } => raw,
+                Tok::Quoted(s) => s,
+                other => bail!("TRACE takes an edge type here, got {:?}", other),
+            };
+            let rev = if self.peek().is_kw("REVERSE") {
+                self.next();
+                true
+            } else {
+                false
+            };
+            (Some(edge), rev)
+        } else {
+            (None, false)
+        };
+
+        let traverse = if self.peek().is_kw("TRAVERSE")
+            && names_a_thing(self.peek_at(1))
+        {
+            self.next();
+            match self.next() {
+                Tok::Word { raw, .. } => Some(raw),
+                Tok::Quoted(s) => Some(s),
+                other => bail!("TRAVERSE takes a relation name here, got {:?}", other),
+            }
+        } else {
+            None
+        };
+
         let (alias, col_aliases) = self.parse_table_alias()?;
-        Ok(TableRef { name, alias, sub: None, args: None, col_aliases, lateral: false, as_of, valid_as_of, search })
+        Ok(TableRef { name, alias, sub: None, args: None, col_aliases, lateral: false, as_of, valid_as_of, search, trace, trace_reverse, traverse })
     }
 
     /// `AS alias`, or a bare alias, optionally followed by `(col, col)`.

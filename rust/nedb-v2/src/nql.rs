@@ -1472,19 +1472,13 @@ fn id_point_lookup(pred: &Pred) -> Option<String> {
     }
 }
 
-fn matches_valid_as_of(node: &Node, date: &str) -> bool {
-    // A node is valid at `date` if:
-    //   valid_from is None OR valid_from <= date
-    //   AND (valid_to is None OR valid_to > date)
-    let from_ok = node.valid_from.as_deref().map(|f| f <= date).unwrap_or(true);
-    let to_ok   = node.valid_to.as_deref().map(|t| t > date).unwrap_or(true);
-    from_ok && to_ok
-}
-
-fn node_contains_text(node: &Node, text: &str) -> bool {
-    let s = node.data.to_string().to_lowercase();
-    s.contains(&text.to_lowercase())
-}
+// `matches_valid_as_of` and `node_contains_text` MOVED to `crate::relation`,
+// which is now the single definition of what these two verbs mean. They are
+// re-exported here rather than reimplemented: the SQL evaluator reads
+// relations through `relation::read`, and a second copy of "is this row valid
+// at this date" living in the query language is precisely the duplication that
+// folding NQL into neSQL exists to remove.
+use crate::relation::{matches_valid_as_of, node_contains_text};
 
 /// A node as a flat query row: data fields at the top level plus the `_`-prefixed
 /// metadata. Public so the HTTP single-row GET returns the SAME shape a query row

@@ -115,13 +115,24 @@ class Daemon:
         self.label = "evaluator" if sql_engine else "translator"
         self.http_port, self.pg_port = free_port(), free_port()
         env = {**os.environ, "NEDBD_SWEEP_S": "0"}
+        # The polarity is INVERTED from what it was, and the reason matters.
+        #
+        # This used to set NEDBD_SQL_ENGINE=1 to reach the evaluator. That flag
+        # is gone: the evaluator now answers every SELECT it can parse, with no
+        # switch. Had this file been left alone it would have kept passing —
+        # both daemons would be the evaluator, and it would have compared one
+        # engine with itself. The header below warned about precisely that
+        # tautology, guarding the ENVIRONMENT against it; nothing could guard
+        # against the flag going inert in the code.
+        #
+        # So the evaluator side now sets nothing, and the TRANSLATOR side is
+        # the one that needs a lever. NEDB_PARITY_FORCE_TRANSLATOR is test-only
+        # and exists for this file alone.
+        env.pop("NEDBD_SQL_ENGINE", None)
         if sql_engine:
-            env["NEDBD_SQL_ENGINE"] = "1"
+            env.pop("NEDB_PARITY_FORCE_TRANSLATOR", None)
         else:
-            # Removed rather than set to 0, so an inherited value from the
-            # caller's shell cannot silently make both daemons the same engine
-            # and turn this whole file into a tautology that always passes.
-            env.pop("NEDBD_SQL_ENGINE", None)
+            env["NEDB_PARITY_FORCE_TRANSLATOR"] = "1"
         self.proc = subprocess.Popen(
             [BIN, "--data", os.path.join(tmp, self.label),
              "--port", str(self.http_port), "--pg-port", str(self.pg_port)],
