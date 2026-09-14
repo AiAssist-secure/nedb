@@ -61,6 +61,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
 from . import __version__
+from . import namespace as _ns
 from .engine import NEDB
 from .concurrent import Sequencer
 from .log import ReplayError
@@ -180,9 +181,27 @@ class Manager:
 
     @staticmethod
     def collection_counts(db: NEDB) -> Dict[str, int]:
-        counts: Dict[str, int] = {}
+        """Live row counts per collection, for the public surface.
+
+        Two things this must get right, and the second one is why it is not a
+        one-line key split any more.
+
+        Engine-owned collections are EXCLUDED. `_nedb.*` is bookkeeping; it
+        leaked into `/v1/databases/<name>` as a collection with rows, which
+        both named an internal detail publicly and inflated the row count. A
+        deploy test comparing seeded rows against reported rows is what caught
+        it.
+
+        And the collection LIST comes from the registry rather than from which
+        document keys happen to be live, so a collection that was created and
+        then emptied still reports — with zero rows. It exists; it is empty.
+        Those are different facts and the API should not merge them.
+        """
+        counts: Dict[str, int] = {c: 0 for c in db.collections()}
         for key in db.store.keys(""):
             coll = key.split(":", 1)[0]
+            if _ns.is_reserved(coll):
+                continue
             counts[coll] = counts.get(coll, 0) + 1
         return counts
 

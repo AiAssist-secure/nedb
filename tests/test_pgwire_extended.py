@@ -216,9 +216,23 @@ def suite_psycopg3(pg_port):
 
             # THE assertion this whole endpoint exists for: a plain SQL UPDATE
             # through a plain SQL driver, and the previous value is still there.
-            cur.execute("SELECT total FROM orders AS OF SYSTEM TIME 0 WHERE _id = %s", ("1",))
+            # Sequence 0 is not necessarily the first user write — registering
+            # a collection is itself a write — so find the earliest sequence at
+            # which order "1" is visible rather than assuming one. The point of
+            # the assertion is that the ORIGINAL value survived an UPDATE made
+            # through a plain SQL driver, not where the engine's bookkeeping
+            # happens to sit.
+            _first = None
+            for _n in range(0, 16):
+                cur.execute(
+                    f"SELECT total FROM orders AS OF SYSTEM TIME {_n} WHERE _id = %s",
+                    ("1",))
+                _rows = cur.fetchall()
+                if _rows:
+                    _first = _rows
+                    break
             check("history survives writes made over the extended protocol",
-                  cur.fetchall() == [(120,)], "AS OF")
+                  _first == [(120,)], f"AS OF — got {_first}")
 
             cur.execute("DELETE FROM orders WHERE _id = %s RETURNING _id", ("x1",))
             check("DELETE … RETURNING with bound parameters",

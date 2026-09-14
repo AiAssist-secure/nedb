@@ -333,9 +333,16 @@ def suite_postgres():
         check("an UPDATE supersedes the same document",
               [r.get("status") for r in conn.nedb.query("FROM drivers")] == ["off"],
               str(plain(conn.nedb.query("FROM drivers"))))
+        # Discover the first sequence at which `drivers` has any row, rather
+        # than assuming it is 0. Registering a collection is itself a write,
+        # so a collection's first document lands one position after its
+        # registry record. This assertion is about the prior value surviving
+        # an UPDATE, not about where the engine's bookkeeping sits.
+        _first = next((n for n in range(0, 16)
+                       if conn.nedb.query(f"FROM drivers AS OF {n}")), 0)
         check("…and the prior value is readable at an earlier sequence",
               "active" in [r.get("status")
-                           for r in conn.nedb.query("FROM drivers AS OF 0")],
+                           for r in conn.nedb.query(f"FROM drivers AS OF {_first}")],
               "this is the whole point of shadowing into NEDB")
 
         # DELETE → tombstone.

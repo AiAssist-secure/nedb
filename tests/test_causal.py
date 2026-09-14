@@ -135,14 +135,17 @@ finally:
 # ─────────────────────────────────────────────────────────────────────────────
 section("Backward compat — old ops without provenance still verify")
 db_old = NEDB()
-db_old.put("t", "r1", {"v": 1})
-db_old.put("t", "r2", {"v": 2})
+# Capture the sequences rather than assuming them. Registering a collection is
+# itself a write, so the first user write does not land at 0 and the causes
+# below are not [0, 1] — they are whatever these two writes actually got.
+r1 = db_old.put("t", "r1", {"v": 1})["_seq"]
+r2 = db_old.put("t", "r2", {"v": 2})["_seq"]
 check("old-style writes verify",     db_old.verify())
 # Now mix provenance writes into the same chain
-db_old.put("t", "r3", {"v": 3}, caused_by=[0, 1], evidence="inference")
+r3 = db_old.put("t", "r3", {"v": 3}, caused_by=[r1, r2], evidence="inference")["_seq"]
 check("mixed chain still verifies",  db_old.verify())
-check("old op has no caused_by",     db_old.log.ops[0].caused_by is None)
-check("new op has caused_by",        db_old.log.ops[2].caused_by == [0, 1])
+check("old op has no caused_by",     db_old.log.ops[r1].caused_by is None)
+check("new op has caused_by",        db_old.log.ops[r3].caused_by == [r1, r2])
 
 # ─────────────────────────────────────────────────────────────────────────────
 section("Causal graph — multi-hop scenario")

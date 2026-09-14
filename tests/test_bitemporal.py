@@ -162,7 +162,11 @@ section("Bi-temporal sealed in hash chain")
 db5 = NEDB()
 db5.put("facts", "f1", {"v": 1}, valid_from="2024-01-01", valid_to="2024-12-31")
 
-op = next(o for o in db5.log.ops if o.op == "put")
+# The FIRST put in the log is not necessarily the user's: registering a
+# collection is itself a write, so select the op that targets this document
+# rather than the first one that happens to be a put.
+op = next(o for o in db5.log.ops
+          if o.op == "put" and o.payload.get("coll") == "facts")
 check("Op.valid_from sealed",  op.valid_from == "2024-01-01")
 check("Op.valid_to sealed",    op.valid_to   == "2024-12-31")
 check("chain verifies (valid_from/to in hash)", db5.verify())

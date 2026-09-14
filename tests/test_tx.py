@@ -53,8 +53,14 @@ try:
         {"op": "put", "coll": "pin", "id": "withdrawals:w0",
          "doc": {"status": "seed"}},
     ])
-    # db.seq is the LAST op's seq (0-based): two ops -> seq == 1
-    check("unconditional tx applies all", out["count"] == 2 and db.seq == 1)
+    # The tx applied two ops. `db.seq` is the last op's seq, and it is NOT
+    # `count - 1`: registering a collection is itself a write, so the first
+    # write into a new collection is preceded by its registry record. Assert
+    # what the tx did, not where the engine's bookkeeping happens to sit.
+    check("unconditional tx applies all",
+          out["count"] == 2
+          and [r["op"] for r in out["results"]] == ["put", "put"]
+          and len(db.query("FROM pin")) == 2)
 
     # CAS pass: correct if_seq
     v = db.last_seq("pin", "billing:op1")
@@ -114,8 +120,12 @@ try:
     s_after_first = db.seq
     db.tx([{"op": "put", "coll": "kv", "id": "i1",
             "doc": {"v": 1}, "idem": "tx-idem-1"}])
+    # The property is DEDUPE: the second identical tx must not advance the
+    # log at all. How far the FIRST one advanced is bookkeeping — it also
+    # registered the collection `kv`, so it moved by two, not one.
     check("idem dedupes inside tx",
-          s_after_first == s + 1 and db.seq == s_after_first)
+          s_after_first > s and db.seq == s_after_first,
+          f"{s} -> {s_after_first} -> {db.seq}")
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

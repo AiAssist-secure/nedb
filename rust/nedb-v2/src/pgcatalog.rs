@@ -147,7 +147,7 @@ fn oid_for(name: &str) -> i64 {
 /// The collections in the database, sorted so a listing is stable run to run.
 fn collections(db: Option<&Arc<Db>>) -> Vec<String> {
     let mut out = match db {
-        Some(db) => db.id_index.collections(),
+        Some(db) => db.collections(),
         None => vec![],
     };
     // Internal bookkeeping is not a user table. `__links__` holds relation

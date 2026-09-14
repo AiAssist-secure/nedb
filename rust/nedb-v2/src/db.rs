@@ -154,6 +154,15 @@ pub struct Db {
     /// and the cold-scan background pass. Only covers nodes from the current
     /// process session + cold-scan; older seqs not in this map cannot be resolved.
     seq_index:          Arc<DashMap<u64, String>>,
+    /// Collections already known to be registered, so the common case — every
+    /// write after a collection's first — costs one lock-free map hit instead of
+    /// an index lookup.
+    ///
+    /// A CACHE, never the answer. `collections()` reads the registry in the DAG.
+    /// A stale or empty cache can only cause a redundant registry check, never a
+    /// wrong namespace, which is the asymmetry that makes it safe to keep it
+    /// this simple.
+    known_collections:  Arc<DashMap<String, ()>>,
 }
 
 impl Db {
@@ -176,6 +185,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(true)),  // always ready
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            known_collections: Arc::new(DashMap::new()),
         }
     }
 
@@ -241,6 +251,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(false)),
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            known_collections: Arc::new(DashMap::new()),
         };
 
         // Auto-migrate v1 → v2 if needed (pass DEK so encrypted AOFs convert correctly)
@@ -420,7 +431,33 @@ impl Db {
     }
 
     /// Write a document. Returns the new node with its content hash set.
+    ///
+    /// Refuses an unusable or engine-owned collection name, and registers the
+    /// collection if this is its first write — so that "this collection exists"
+    /// becomes a durable fact at the moment it becomes true, rather than an
+    /// inference drawn later from whatever the storage layer happens to have
+    /// lying around.
     pub fn put(
+        &self,
+        coll: &str,
+        id: &str,
+        data: Value,
+        caused_by: Vec<String>,
+        valid_from: Option<String>,
+        valid_to:   Option<String>,
+    ) -> Result<Node> {
+        crate::namespace::validate_writable(coll)?;
+        self.ensure_collection(coll)?;
+        self.put_unchecked(coll, id, data, caused_by, valid_from, valid_to)
+    }
+
+    /// The write itself, with no namespace policy applied.
+    ///
+    /// Exists so the engine can write its own reserved records through exactly
+    /// the same path user data takes — same object store, same version chain,
+    /// same Merkle head. A registry that was written by a side channel would be
+    /// a registry `verify()` does not cover.
+    pub(crate) fn put_unchecked(
         &self,
         coll: &str,
         id: &str,
@@ -491,6 +528,380 @@ impl Db {
         Ok(node)
     }
 
+    // ── Collection registry ───────────────────────────────────────────────
+    //
+    // See `crate::namespace` for why a collection's existence has to be a
+    // recorded event rather than an inference from storage.
+
+    /// Record that a collection exists, if that is not already recorded.
+    ///
+    /// Idempotent, and cheap after the first write to a given collection: a
+    /// `DashMap` hit. On a miss it consults the registry itself before writing,
+    /// so reopening a database does not re-register everything in it.
+    pub(crate) fn ensure_collection(&self, coll: &str) -> Result<()> {
+        // Fast path: already known, no locking at all. This is every write
+        // after a collection's first.
+        if self.known_collections.contains_key(coll) {
+            return Ok(());
+        }
+
+        // Slow path, taken once per collection per process. The entry lock is
+        // held across the registry write ON PURPOSE: registration has to be
+        // exactly-once, and a check-then-write without it is a race that N
+        // concurrent first-writers all win.
+        //
+        // That race was not hypothetical. Four threads writing into a fresh
+        // collection each saw it as unregistered and each appended a registry
+        // record — harmless to the ANSWER (same id, the version chain just
+        // grows) but four seqs and four nodes spent on one fact, and on a
+        // wide parallel ingest it would be one per writer. A concurrency test
+        // asserting exact sequence counts is what caught it.
+        //
+        // Holding a shard lock across I/O is safe here because nothing in the
+        // write path touches `known_collections`, so there is no path back
+        // into this map to deadlock against.
+        use dashmap::mapref::entry::Entry;
+        match self.known_collections.entry(coll.to_string()) {
+            Entry::Occupied(_) => Ok(()),
+            Entry::Vacant(slot) => {
+                if let Some(rec) = self.get(crate::namespace::COLLECTIONS, coll) {
+                    // Registered in a previous process. Revive it if it was
+                    // dropped and is being written to again — a write is an
+                    // unambiguous assertion that the caller means for this
+                    // collection to exist.
+                    if rec.data.get("dropped").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        self.write_collection_record(coll, false)?;
+                    }
+                } else {
+                    self.write_collection_record(coll, false)?;
+                }
+                slot.insert(());
+                Ok(())
+            }
+        }
+    }
+
+    /// Append a registry record. Creation and drop are the same shape, because
+    /// they are the same kind of event: an assertion, at a sequence, about
+    /// whether a name is currently live. The `prev` chain makes the history of
+    /// that name walkable by exactly the machinery that walks every other
+    /// document's history.
+    fn write_collection_record(&self, coll: &str, dropped: bool) -> Result<()> {
+        let seq = self.seq.load(Ordering::SeqCst);
+        self.put_unchecked(
+            crate::namespace::COLLECTIONS,
+            coll,
+            serde_json::json!({ "name": coll, "dropped": dropped, "at_seq": seq }),
+            vec![], None, None,
+        )?;
+        Ok(())
+    }
+
+    /// Every collection that currently exists.
+    ///
+    /// THE authoritative answer, and the one a state root must commit to.
+    /// Invariant across storage backends and independent of flush timing,
+    /// because it reads recorded events rather than directory entries.
+    ///
+    /// An empty-but-created collection is present here. That is the whole
+    /// point: a database where `orders` was created and then emptied is not the
+    /// same database as one where `orders` never existed, and a root that
+    /// cannot tell them apart is not committing to the namespace.
+    pub fn collections(&self) -> Vec<String> {
+        let mut live: Vec<String> = self.id_index
+            .list_ids(crate::namespace::COLLECTIONS)
+            .into_iter()
+            .filter(|name| {
+                self.get(crate::namespace::COLLECTIONS, name)
+                    .map(|rec| !rec.data.get("dropped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Which collections existed as of a sequence. The namespace is versioned
+    /// for free, because the registry is ordinary documents in the DAG.
+    pub fn collections_as_of(&self, target_seq: u64) -> Vec<String> {
+        let mut live: Vec<String> = self
+            .list_ids_including_deleted(crate::namespace::COLLECTIONS)
+            .into_iter()
+            .filter(|name| {
+                self.get_as_of(crate::namespace::COLLECTIONS, name, target_seq)
+                    .map(|rec| !rec.data.get("dropped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Drop a collection: record that the name is no longer live.
+    ///
+    /// A TOMBSTONE, not an erasure — the same contract `delete` already has for
+    /// documents. The registry keeps the name, marked dropped, so `AS OF`
+    /// before the drop still reports the collection as having existed, and a
+    /// later root can distinguish "dropped" from "never created".
+    ///
+    /// Documents are left where they are. Reclaiming them is `compact`'s job
+    /// and an operator's explicit decision; quietly destroying history behind a
+    /// namespace operation is exactly the behaviour the engine refuses to have.
+    ///
+    /// Returns false when the collection was not live to begin with.
+    pub fn drop_collection(&self, coll: &str) -> Result<bool> {
+        crate::namespace::validate_writable(coll)?;
+        let live = self.get(crate::namespace::COLLECTIONS, coll)
+            .map(|rec| !rec.data.get("dropped")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+            .unwrap_or(false);
+        if !live {
+            return Ok(false);
+        }
+        self.write_collection_record(coll, true)?;
+        self.known_collections.remove(coll);
+        Ok(true)
+    }
+
+    // ── State roots ───────────────────────────────────────────────────────
+    //
+    // See `crate::root` for the format and for why the leaves are logical
+    // content rather than object hashes.
+
+    /// Every live document, as the material a root is computed from.
+    fn live_records(&self) -> Vec<Node> {
+        let mut out = Vec::new();
+        for coll in self.collections() {
+            for id in self.id_index.list_ids(&coll) {
+                if let Some(n) = self.get(&coll, &id) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// The database's current state root.
+    ///
+    /// A stateless recomputation over live state, not a maintained tree. That
+    /// is a deliberate v1 choice: an incrementally-updated Merkle tree is a
+    /// second source of truth that can silently drift from the first, and the
+    /// cost of being wrong about a root is much higher than the cost of
+    /// recomputing one.
+    pub fn state_root(&self) -> std::result::Result<crate::root::StateRoot, String> {
+        let colls = self.collections();
+        let nodes = self.live_records();
+        let refs: Vec<crate::root::RecordRef<'_>> = nodes.iter()
+            .map(|n| crate::root::RecordRef {
+                coll: &n.coll,
+                id: &n.id,
+                data: &n.data,
+                valid_from: n.valid_from.as_deref(),
+                valid_to: n.valid_to.as_deref(),
+            })
+            .collect();
+        crate::root::compute(&colls, &refs)
+    }
+
+    /// The state root as of a sequence.
+    ///
+    /// Reuses the same enumeration `AS OF` queries already use — live ids plus
+    /// the graveyard — so a historical root sees exactly what a historical
+    /// query would see. Anything else would be a root for a state no query can
+    /// return.
+    ///
+    /// `None` when the material is gone: `compact` prunes superseded versions,
+    /// and a root over history that has been discarded cannot be recomputed.
+    /// Reported as unavailable rather than approximated.
+    pub fn state_root_as_of(&self, target_seq: u64)
+        -> std::result::Result<crate::root::StateRoot, String>
+    {
+        let colls = self.collections_as_of(target_seq);
+        let mut nodes = Vec::new();
+        for coll in &colls {
+            for id in self.list_ids_including_deleted(coll) {
+                if let Some(n) = self.get_as_of(coll, &id, target_seq) {
+                    nodes.push(n);
+                }
+            }
+        }
+        let refs: Vec<crate::root::RecordRef<'_>> = nodes.iter()
+            .map(|n| crate::root::RecordRef {
+                coll: &n.coll,
+                id: &n.id,
+                data: &n.data,
+                valid_from: n.valid_from.as_deref(),
+                valid_to: n.valid_to.as_deref(),
+            })
+            .collect();
+        crate::root::compute(&colls, &refs)
+    }
+
+    // ── Persisted root records ────────────────────────────────────────────
+
+    /// Persist the state root as of a sequence.
+    ///
+    /// Creation and BACKFILL are the same operation with different arguments,
+    /// and they are deliberately not the same COMMAND: `at_seq` at the tip is
+    /// O(live state), while `at_seq` in the past is O(live state) plus a
+    /// version-chain walk per document. Hiding the second behind something
+    /// that looks like the first is how an operator discovers the cost by
+    /// waiting.
+    pub fn create_root_at(&self, at_seq: u64) -> Result<crate::root::RootRecord> {
+        let computed = self.state_root_as_of(at_seq)
+            .map_err(|e| anyhow::anyhow!("compute root at seq {}: {}", at_seq, e))?;
+        let rec = crate::root::RootRecord { at_seq, root: computed };
+        let data = serde_json::to_value(&rec)?;
+        self.put_unchecked(
+            crate::namespace::ROOTS,
+            &crate::namespace::seq_id(at_seq),
+            data, vec![], None, None,
+        )?;
+        Ok(rec)
+    }
+
+    /// Persist the state root at the current tip.
+    pub fn create_root(&self) -> Result<crate::root::RootRecord> {
+        // The tip is the last ASSIGNED seq, so one below the next one out.
+        let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
+        self.create_root_at(tip)
+    }
+
+    /// A persisted root record, if one was taken at this sequence.
+    pub fn get_root(&self, at_seq: u64) -> Option<crate::root::RootRecord> {
+        let n = self.get(crate::namespace::ROOTS, &crate::namespace::seq_id(at_seq))?;
+        serde_json::from_value(n.data).ok()
+    }
+
+    /// Every persisted root, oldest first.
+    pub fn list_roots(&self) -> Vec<crate::root::RootRecord> {
+        self.id_index
+            .list_ids(crate::namespace::ROOTS)
+            .into_iter()
+            .filter_map(|id| self.get(crate::namespace::ROOTS, &id))
+            .filter_map(|n| serde_json::from_value::<crate::root::RootRecord>(n.data).ok())
+            .collect()
+    }
+
+    /// Check a persisted root against a fresh recomputation.
+    ///
+    /// Two INDEPENDENT facts, reported independently:
+    ///
+    ///   - the record exists and is well-formed
+    ///   - the history needed to recompute it is still here
+    ///
+    /// A persisted root may outlive the material that produced it — `compact`
+    /// discards superseded versions, and after that a historical root is a
+    /// perfectly valid record of something no longer reconstructable. Folding
+    /// that into PASS would claim a verification that did not happen, and
+    /// folding it into FAIL would report tampering that did not occur. So it
+    /// is neither.
+    pub fn verify_root(&self, at_seq: u64) -> crate::root::RootVerification {
+        let record = match self.get_root(at_seq) {
+            None => return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Missing,
+                recomputation: crate::root::Recomputation::NotAttempted,
+                recomputed: None,
+            },
+            Some(r) => r,
+        };
+        if record.root.version != "state_root_v1" {
+            return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::UnknownVersion(record.root.version.clone()),
+                recomputation: crate::root::Recomputation::NotAttempted,
+                recomputed: None,
+            };
+        }
+        // The floor is the oldest sequence still reconstructable. Below it the
+        // material is gone and a mismatch would say nothing about integrity.
+        if at_seq < self.history_floor() {
+            return crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Valid,
+                recomputation: crate::root::Recomputation::Unavailable(crate::root::UnavailableReason::HistoryPruned),
+                recomputed: None,
+            };
+        }
+        match self.state_root_as_of(at_seq) {
+            Err(e) => crate::root::RootVerification {
+                at_seq,
+                record: crate::root::RecordStatus::Valid,
+                recomputation: crate::root::Recomputation::Unavailable(crate::root::UnavailableReason::Other(e)),
+                recomputed: None,
+            },
+            Ok(fresh) => {
+                let agrees = fresh.state_root == record.root.state_root;
+                crate::root::RootVerification {
+                    at_seq,
+                    record: crate::root::RecordStatus::Valid,
+                    recomputation: if agrees {
+                        crate::root::Recomputation::Matches
+                    } else {
+                        crate::root::Recomputation::Differs
+                    },
+                    recomputed: Some(fresh),
+                }
+            }
+        }
+    }
+
+    /// The oldest sequence whose state can still be reconstructed.
+    ///
+    /// 0 until something prunes. `compact` records where it cut, because after
+    /// it runs the engine cannot otherwise tell "this sequence had no writes"
+    /// from "this sequence's writes were discarded" — and those two answers
+    /// differ by whether a failed verification means anything.
+    pub fn history_floor(&self) -> u64 {
+        self.get(crate::namespace::META, "history_floor")
+            .and_then(|n| n.data.get("floor").and_then(|v| v.as_u64()))
+            .unwrap_or(0)
+    }
+
+    /// Declare where reconstructable history begins.
+    ///
+    /// Public because pruning is not only something `compact` does: an
+    /// operator who restores from a trimmed backup, or ships a database with
+    /// its early segments removed, has pruned history that the engine has no
+    /// way to notice. Without a way to say so, every historical root in that
+    /// database would fail verification as if it had been tampered with.
+    ///
+    /// MONOTONIC. The floor may rise and may never fall, because lowering it
+    /// asserts that history exists which demonstrably does not — and the first
+    /// thing that assertion does is turn an honest "unavailable" into a
+    /// confident, wrong "mismatch".
+    pub fn set_history_floor(&self, floor: u64) -> Result<()> {
+        let current = self.history_floor();
+        if floor < current {
+            anyhow::bail!(
+                "refusing to lower the history floor from {} to {}: the floor records \
+                 what was DISCARDED, and material does not come back. Lowering it would \
+                 make the engine attempt recomputations it cannot perform and report the \
+                 failures as mismatches.",
+                current, floor
+            );
+        }
+        if floor == current {
+            return Ok(());
+        }
+        self.write_history_floor(floor)
+    }
+
+    fn write_history_floor(&self, floor: u64) -> Result<()> {
+        self.put_unchecked(
+            crate::namespace::META, "history_floor",
+            serde_json::json!({"floor": floor}),
+            vec![], None, None,
+        )?;
+        Ok(())
+    }
+
     /// Batch put: write N documents in parallel, preserving monotonic seq ordering.
     /// Pre-allocates N seq numbers atomically, then parallelises object writes and
     /// id-index updates via Rayon. Each op is independent — safe to parallelise.
@@ -503,6 +914,21 @@ impl Db {
         use rayon::prelude::*;
 
         if ops.is_empty() { return Ok(vec![]); }
+
+        // Validate and register EVERY collection before allocating a single
+        // seq. A batch that is going to be refused must be refused before it
+        // has written anything, and registration consumes seqs of its own — so
+        // it cannot happen inside the block that assumes N consecutive ones.
+        for (coll, ..) in ops.iter() {
+            crate::namespace::validate_writable(coll)?;
+        }
+        for coll in ops.iter()
+            .map(|(c, ..)| c.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            self.ensure_collection(coll)?;
+        }
+
         let n = ops.len() as u64;
 
         // Pre-allocate N consecutive seq numbers — preserves ordering under concurrency
@@ -684,7 +1110,31 @@ impl Db {
     /// object that no longer exists. `get_as_of` degrades to `None` there
     /// rather than failing, so a compacted store answers "not available at that
     /// sequence" instead of erroring or inventing a value.
+    ///
+    /// # Live branches veto it
+    ///
+    /// A branch promises a future three-way merge, and a three-way merge needs
+    /// the BASE side: the parent state as of the branch's fork point. This
+    /// prunes every superseded version down to the tip, which is exactly the
+    /// material that base is made of. Running it under a live branch would
+    /// produce "branch exists, merge ancestry gone" — a branch that can never
+    /// be reconciled and does not find that out until someone tries.
+    ///
+    /// Because compaction here is all-or-nothing to the tip, there is no honest
+    /// partial answer ("prune down to the pin" is a different algorithm, not a
+    /// parameter). So the answer is REFUSAL, naming the branches and what they
+    /// pin. There is deliberately no force flag: a bypass would be reached for
+    /// exactly when it does the damage, and a silent bypass is the thing this
+    /// interlock exists to design out. The operator's escape hatch is to merge
+    /// or abandon the branch — both of which are recorded decisions.
     pub fn compact(&self) -> Result<crate::segment::CompactStats> {
+        // Interlock first: before touching anything, ask what history is spoken
+        // for. `None` means no live branch, which is the only state in which
+        // history may be discarded freely.
+        if let Some(pinned) = crate::branch::minimum_pinned_seq(self) {
+            anyhow::bail!("{}", crate::branch::compaction_refusal(self, pinned));
+        }
+
         self.flush_all();
         let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
         for coll in self.id_index.collections() {
@@ -694,7 +1144,27 @@ impl Db {
                 }
             }
         }
-        self.objects.compact(&live)
+        let stats = self.objects.compact(&live)?;
+
+        // Record where history now begins — but ONLY if history was actually
+        // discarded.
+        //
+        // `ObjectStore::compact` is a no-op that returns zeroed stats for the
+        // loose-object (v2) and in-memory substrates: it prunes nothing at all
+        // unless the v3 segment store is active. Raising the floor
+        // unconditionally therefore declared every earlier sequence pruned on
+        // a database where nothing had been pruned, and every historical root
+        // became permanently unverifiable with reason HISTORY_PRUNED.
+        //
+        // That is a FALSE ALARM, and a false alarm is the one failure this
+        // three-state verification exists to prevent — an operator who cannot
+        // trust "unavailable" is back to guessing, which is where PASS/FAIL
+        // left them. So the floor moves on evidence: objects were dropped.
+        if stats.dropped_objects > 0 {
+            let tip = self.seq.load(Ordering::SeqCst).saturating_sub(1);
+            self.set_history_floor(tip)?;
+        }
+        Ok(stats)
     }
 
     /// Flush MANIFEST to disk if dirty. No-op for in-memory databases.
@@ -863,6 +1333,7 @@ impl Db {
     /// Delete a document — writes a tombstone node and removes the id from the index.
     /// The object history is preserved in the DAG; only the live id pointer is cleared.
     pub fn delete(&self, coll: &str, id: &str) -> Result<bool> {
+        crate::namespace::validate_writable(coll)?;
         let prev = match self.id_index.get(coll, id) {
             None => return Ok(false),   // already gone
             Some(h) => h,
@@ -1669,15 +2140,17 @@ mod tests_v2 {
         let dir = tempdir().unwrap();
         let db = Db::open(dir.path(), None).unwrap();
         db.put("orders", "a", serde_json::json!({"t": 1}), vec![], None, None).unwrap();
-        // A surviving sibling, so the collection is still live after the
-        // delete. (With `a` alone, `orders` would have no index entries left
-        // and so no directory to enumerate — existing behaviour, unrelated to
-        // the graveyard, but it would make this test assert the wrong thing.)
+        // A surviving sibling. This used to be load-bearing: with `a` alone,
+        // `orders` had no index entries left and so no directory to enumerate,
+        // and the test would have asserted the wrong thing for a reason that
+        // had nothing to do with the graveyard. The collection registry fixed
+        // that — an emptied collection stays in the namespace — so the sibling
+        // is now just a second row.
         db.put("orders", "b", serde_json::json!({"t": 2}), vec![], None, None).unwrap();
         db.delete("orders", "a").unwrap();
         db.try_flush_all().unwrap();
 
-        let colls = db.id_index.collections();
+        let colls = db.collections();
         assert!(!colls.iter().any(|c| c == "graveyard"),
                 "the graveyard must not look like a collection: {:?}", colls);
         assert_eq!(colls, vec!["orders".to_string()]);
@@ -1899,7 +2372,11 @@ mod tests_v2 {
             assert!(ok > 0 && bad.is_empty(), "objects must still be intact and verifying");
 
             let written = db.repair().unwrap();
-            assert_eq!(written, 25, "one entry per distinct (coll, id)");
+            // 25 rows plus the one `_nedb.collections` record that registered
+            // the collection. The registry is written through the ordinary
+            // object path precisely so that repair, verify and replication
+            // cover it without knowing it is special.
+            assert_eq!(written, 26, "one entry per distinct (coll, id)");
             assert_eq!(db.list("rows").len(), 25, "every row must come back");
 
             // The winner for a re-put id is the HIGHEST seq, matching put().
@@ -1961,15 +2438,19 @@ mod tests_v2 {
         assert!(!drained.has_more, "genuinely caught up reports has_more=false");
 
         // KNOWN SHARP EDGE, pinned here deliberately: the cursor is EXCLUSIVE
-        // and seqs start at 0, so `since(0, _)` returns (0, head] and the very
-        // first write in a database (seq 0) is not reachable through any cursor
-        // value. 10 writes therefore drain as 9 records. Changing the cursor
-        // convention would break existing replication consumers, so this is
-        // documented rather than silently altered — but a replica seeded from
-        // since() alone starts one record short.
+        // and seqs start at 0, so `since(0, _)` returns (0, head] and whatever
+        // holds seq 0 is not reachable through any cursor value. Changing the
+        // cursor convention would break existing replication consumers, so this
+        // is documented rather than silently altered.
+        //
+        // The collection registry softened it by accident and in the right
+        // direction: seq 0 is now the `_nedb.collections` record rather than a
+        // user's first row, so all 10 writes drain. A replica seeded from
+        // since() alone is still one record short — but the record it misses is
+        // one it can re-derive, instead of somebody's data.
         assert_eq!(
             drained.nodes.len(),
-            9,
+            10,
             "since(0) is exclusive of seq 0 — see the sharp edge noted above"
         );
         assert!(
@@ -2083,7 +2564,8 @@ mod tests_v2 {
         }
 
         let status = db.scan_status();
-        assert_eq!(status.indexed_count, n as usize, "every written object must be indexed");
+        // n rows + the collection registry record for "things".
+        assert_eq!(status.indexed_count, n as usize + 1, "every written object must be indexed");
         assert!(status.scan_complete);
 
         let tip = db.tip().expect("tip resolves after cold scan");
@@ -2118,17 +2600,19 @@ mod tests_v2 {
             for h in handles { h.join().unwrap(); }
             // In-session: tip must be the highest assigned seq.
             let expected = db.seq.load(std::sync::atomic::Ordering::SeqCst) - 1;
-            assert_eq!(expected, total - 1, "exactly {} writes expected", total);
+            // `total` user writes plus one registry record for collection "c",
+            // so the highest assigned seq is `total`, not `total - 1`.
+            assert_eq!(expected, total, "exactly {} writes expected", total);
             assert_eq!(db.tip().expect("in-session tip").seq, expected);
             db.flush_all(); // persist MANIFEST incl. tip_hash
         }
         // Warm reopen: seq_index cold; tip() resolves via MANIFEST tip_hash.
         let db2 = Db::open(dir.path(), None).unwrap();
         let tip = db2.tip().expect("tip must survive warm restart after concurrent writes");
-        assert_eq!(tip.seq, total - 1, "warm-boot tip must be the highest-seq write");
+        assert_eq!(tip.seq, total, "warm-boot tip must be the highest-seq write");
         // Per-collection tip: same contract.
         let ct = db2.tip_collection("c").expect("coll tip survives");
-        assert_eq!(ct.seq, total - 1);
+        assert_eq!(ct.seq, total);
     }
 
     /// Pre-2.5.43 MANIFESTs (no tip_hash) must warm-boot, NOT force a cold
@@ -2284,5 +2768,456 @@ mod tests_v2 {
                     "the Db outlived its last owner — the ticker is leaking it");
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+}
+
+/// Collection identity: does the database know which collections exist,
+/// independently of how and when it happened to store them?
+///
+/// The three tests that used to fail are the first three here. They failed
+/// like this, on the running engine:
+///
+/// ```text
+/// disk, flush between   : ["orders"]
+/// disk, one tick        : []
+/// memory                : []
+/// ```
+#[cfg(test)]
+mod collection_identity {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn j(v: u64) -> serde_json::Value { serde_json::json!({"v": v}) }
+
+    /// Create a collection, then empty it — flushing BETWEEN the two.
+    fn disk_emptied_with_flush_between() -> Vec<String> {
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.flush_all();
+        db.delete("orders", "1").unwrap();
+        db.flush_all();
+        db.collections()
+    }
+
+    /// The same logical history, with no flush in between. Before the registry
+    /// this returned `[]`, because the WAL buffer is keyed by `(coll, id)` and
+    /// the tombstone overwrote the PUT before any directory was created.
+    fn disk_emptied_within_one_tick() -> Vec<String> {
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        db.flush_all();
+        db.collections()
+    }
+
+    fn memory_emptied() -> Vec<String> {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        db.collections()
+    }
+
+    /// A background timer is not a fact about the data.
+    #[test]
+    fn the_same_history_yields_the_same_namespace_regardless_of_flush_timing() {
+        assert_eq!(
+            disk_emptied_with_flush_between(),
+            disk_emptied_within_one_tick(),
+            "a 1-second flush ticker decided the namespace"
+        );
+    }
+
+    /// A root computed on a disk replica and on a memory replica of the same
+    /// database has to be the same root.
+    #[test]
+    fn the_namespace_does_not_depend_on_the_storage_backend() {
+        assert_eq!(
+            disk_emptied_with_flush_between(),
+            memory_emptied(),
+            "disk and memory disagree about which collections exist"
+        );
+    }
+
+    /// The property the Oracle named: an empty-but-durable collection must not
+    /// be indistinguishable from one that never existed.
+    #[test]
+    fn an_emptied_collection_is_not_the_same_as_one_that_never_existed() {
+        assert_eq!(memory_emptied(), vec!["orders".to_string()]);
+
+        let never = Db::in_memory();
+        assert!(never.collections().is_empty());
+    }
+
+    #[test]
+    fn a_dropped_collection_is_gone_but_a_merely_empty_one_is_not() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()], "emptying is not dropping");
+
+        assert!(db.drop_collection("orders").unwrap());
+        assert!(db.collections().is_empty());
+
+        // Dropping twice is not an error, it is just not a second event.
+        assert!(!db.drop_collection("orders").unwrap());
+    }
+
+    #[test]
+    fn writing_to_a_dropped_collection_revives_it() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.drop_collection("orders").unwrap();
+        assert!(db.collections().is_empty());
+
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+    }
+
+    /// The namespace is versioned, because the registry is ordinary documents.
+    #[test]
+    fn the_namespace_can_be_read_as_of_a_sequence() {
+        let db = Db::in_memory();
+        let a = db.put("alpha", "1", j(1), vec![], None, None).unwrap();
+        let b = db.put("beta", "1", j(1), vec![], None, None).unwrap();
+
+        assert_eq!(db.collections_as_of(a.seq), vec!["alpha".to_string()]);
+        assert_eq!(
+            db.collections_as_of(b.seq),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_drop_is_visible_as_a_drop_in_history_not_as_an_absence() {
+        let db = Db::in_memory();
+        let a = db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.drop_collection("orders").unwrap();
+
+        assert!(db.collections().is_empty(), "not live now");
+        assert_eq!(
+            db.collections_as_of(a.seq), vec!["orders".to_string()],
+            "but it existed then, and history says so"
+        );
+    }
+
+    #[test]
+    fn the_registry_does_not_list_itself() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+        assert!(
+            !db.collections().iter().any(|c| crate::namespace::is_reserved(c)),
+            "an engine-owned collection is not part of the user's namespace"
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_write_to_the_registry() {
+        let db = Db::in_memory();
+        assert!(db.put(crate::namespace::COLLECTIONS, "forged", j(1), vec![], None, None).is_err());
+        assert!(db.put("_nedb.anything", "x", j(1), vec![], None, None).is_err());
+        assert!(db.delete(crate::namespace::COLLECTIONS, "orders").is_err());
+        assert!(db.drop_collection(crate::namespace::COLLECTIONS).is_err());
+    }
+
+    #[test]
+    fn a_collection_name_cannot_escape_the_data_directory() {
+        let db = Db::in_memory();
+        for escape in ["../etc", "a/b", "..", ""] {
+            assert!(
+                db.put(escape, "x", j(1), vec![], None, None).is_err(),
+                "{:?} must not be usable as a collection name", escape
+            );
+        }
+    }
+
+    #[test]
+    fn registration_survives_a_reopen_without_re_registering() {
+        let dir = tempdir().unwrap();
+        let seq_after_first_open;
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            db.put("orders", "2", j(2), vec![], None, None).unwrap();
+            db.flush_all();
+            seq_after_first_open = db.seq.load(Ordering::SeqCst);
+        }
+        let db = Db::open(dir.path(), None).unwrap();
+        assert_eq!(db.collections(), vec!["orders".to_string()]);
+        db.put("orders", "3", j(3), vec![], None, None).unwrap();
+        assert_eq!(
+            db.seq.load(Ordering::SeqCst), seq_after_first_open + 1,
+            "reopening and writing again must not append a second registry record"
+        );
+    }
+
+    #[test]
+    fn a_batch_registers_every_collection_it_touches_exactly_once() {
+        let db = Db::in_memory();
+        db.put_batch(vec![
+            ("a".into(), "1".into(), j(1), vec![], None, None),
+            ("b".into(), "1".into(), j(1), vec![], None, None),
+            ("a".into(), "2".into(), j(2), vec![], None, None),
+        ]).unwrap();
+        assert_eq!(db.collections(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            db.id_index.list_ids(crate::namespace::COLLECTIONS).len(), 2,
+            "three writes across two collections is two registry records"
+        );
+    }
+
+    #[test]
+    fn a_batch_naming_a_reserved_collection_writes_nothing_at_all() {
+        let db = Db::in_memory();
+        let before = db.seq.load(Ordering::SeqCst);
+        let r = db.put_batch(vec![
+            ("ok".into(), "1".into(), j(1), vec![], None, None),
+            (crate::namespace::COLLECTIONS.into(), "forged".into(), j(1), vec![], None, None),
+        ]);
+        assert!(r.is_err(), "a batch with a refused collection must be refused");
+        assert_eq!(
+            db.seq.load(Ordering::SeqCst), before,
+            "and must not have written the acceptable half of itself first"
+        );
+        assert!(db.collections().is_empty());
+    }
+}
+
+/// State roots against a live engine: does the root actually track state, and
+/// does verification tell the truth about what it could and could not check?
+#[cfg(test)]
+mod state_roots {
+    use super::*;
+    use crate::root::{RecordStatus, Recomputation, UnavailableReason};
+    use tempfile::tempdir;
+
+    fn j(v: u64) -> serde_json::Value { serde_json::json!({"v": v}) }
+
+    #[test]
+    fn an_empty_database_has_a_stable_nonzero_root() {
+        let a = Db::in_memory().state_root().unwrap();
+        let b = Db::in_memory().state_root().unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a.state_root, "0".repeat(64));
+        assert_eq!(a.collection_count, 0);
+        assert_eq!(a.record_count, 0);
+    }
+
+    /// The invariance the whole format exists for.
+    #[test]
+    fn disk_and_memory_agree_on_the_root_of_the_same_history() {
+        let dir = tempdir().unwrap();
+        let disk = Db::open(dir.path(), None).unwrap();
+        let mem = Db::in_memory();
+        for db in [&disk, &mem] {
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            db.put("orders", "2", j(2), vec![], None, None).unwrap();
+            db.put("users", "u", j(9), vec![], None, None).unwrap();
+        }
+        assert_eq!(disk.state_root().unwrap(), mem.state_root().unwrap());
+    }
+
+    /// Encryption changes object hashes; it must not change the root.
+    #[test]
+    fn an_encrypted_replica_has_the_same_root_as_a_plaintext_one() {
+        let plain_dir = tempdir().unwrap();
+        let enc_dir = tempdir().unwrap();
+        let plain = Db::open(plain_dir.path(), None).unwrap();
+        let enc = Db::open(enc_dir.path(), Some(crate::store::Dek([7u8; 32]))).unwrap();
+        for db in [&plain, &enc] {
+            db.put("orders", "1", serde_json::json!({"total": 100}), vec![], None, None).unwrap();
+        }
+        assert_ne!(
+            plain.get("orders", "1").unwrap().hash,
+            enc.get("orders", "1").unwrap().hash,
+            "precondition: encryption really does change the object hash"
+        );
+        assert_eq!(
+            plain.state_root().unwrap(), enc.state_root().unwrap(),
+            "but the root commits to logical content, so it must not move"
+        );
+    }
+
+    #[test]
+    fn the_root_moves_when_the_state_moves_and_not_otherwise() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let a = db.state_root().unwrap().state_root;
+
+        // A no-op rewrite of the same value: new node, new seq, same state.
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        assert_eq!(db.state_root().unwrap().state_root, a,
+            "the root commits to state, not to how many times you wrote it");
+
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+        assert_ne!(db.state_root().unwrap().state_root, a);
+    }
+
+    #[test]
+    fn a_delete_removes_a_record_but_keeps_the_collection() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        db.delete("orders", "1").unwrap();
+        let r = db.state_root().unwrap();
+        assert_eq!(r.record_count, 0, "a tombstoned document is not live state");
+        assert_eq!(r.collection_count, 1, "but its collection still exists");
+
+        let never = Db::in_memory();
+        assert_ne!(r.state_root, never.state_root().unwrap().state_root);
+    }
+
+    #[test]
+    fn a_historical_root_matches_what_the_tip_root_was_at_that_time() {
+        let db = Db::in_memory();
+        let a = db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let then = db.state_root().unwrap();
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        assert_ne!(db.state_root().unwrap().state_root, then.state_root);
+        assert_eq!(
+            db.state_root_as_of(a.seq).unwrap().state_root, then.state_root,
+            "AS OF the first write is the state after the first write"
+        );
+    }
+
+    #[test]
+    fn a_persisted_root_verifies_against_a_fresh_recomputation() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+
+        let v = db.verify_root(rec.at_seq);
+        assert_eq!(v.record, RecordStatus::Valid);
+        assert_eq!(v.recomputation, Recomputation::Matches);
+        assert!(v.is_verified());
+        assert!(!v.is_mismatch());
+        assert_eq!(v.exit_code(), 0);
+    }
+
+    /// Taking a root must not change the state it describes.
+    #[test]
+    fn taking_a_root_does_not_change_the_root() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let before = db.state_root().unwrap().state_root.clone();
+        db.create_root().unwrap();
+        db.create_root().unwrap();
+        assert_eq!(db.state_root().unwrap().state_root, before,
+            "root records are reserved, so they are not part of the state");
+    }
+
+    #[test]
+    fn later_writes_do_not_retroactively_change_an_old_root() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "2", j(2), vec![], None, None).unwrap();
+        db.put("orders", "1", j(99), vec![], None, None).unwrap();
+
+        let v = db.verify_root(rec.at_seq);
+        assert!(v.is_verified(), "a root is a statement about a sequence, not about now");
+    }
+
+    #[test]
+    fn a_missing_root_is_reported_as_missing_not_as_a_failure() {
+        let db = Db::in_memory();
+        let v = db.verify_root(42);
+        assert_eq!(v.record, RecordStatus::Missing);
+        assert_eq!(v.recomputation, Recomputation::NotAttempted);
+        assert!(!v.is_verified());
+        assert!(!v.is_mismatch(), "absent is not wrong");
+        assert_eq!(v.exit_code(), 4);
+    }
+
+    /// Compaction must not raise the floor when it pruned nothing.
+    ///
+    /// `ObjectStore::compact` is a NO-OP returning zeroed stats on the
+    /// loose-object and in-memory substrates. An unconditional floor bump
+    /// after it declared every earlier sequence pruned on a database where
+    /// nothing had been — turning every historical root permanently
+    /// unverifiable for a reason that was not true. A false alarm defeats the
+    /// whole point of having an "unavailable" state.
+    #[test]
+    fn a_compaction_that_prunes_nothing_does_not_raise_the_floor() {
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+        db.flush_all();
+
+        let stats = db.compact().expect("compact");
+        assert_eq!(stats.dropped_objects, 0, "precondition: v2 compaction prunes nothing");
+        assert_eq!(db.history_floor(), 0, "so no history was lost, and the floor must not move");
+        assert!(
+            db.verify_root(rec.at_seq).is_verified(),
+            "the root must still verify — nothing was discarded"
+        );
+    }
+
+    /// The distinction the Oracle asked for.
+    ///
+    /// Driven through `set_history_floor` rather than a real prune because the
+    /// only substrate that prunes is selected by the process-global
+    /// `NEDB_DAG_V3` environment variable, and tests run threaded in one
+    /// process — setting it here changed the substrate under every other test
+    /// that opened a database at the same moment. The end-to-end prune is
+    /// covered in `tests/v3_integration.rs`, which is its own process.
+    #[test]
+    fn a_pruned_history_reports_unavailable_rather_than_pass_or_fail() {
+        let db = Db::in_memory();
+        db.put("orders", "1", j(1), vec![], None, None).unwrap();
+        let rec = db.create_root().unwrap();
+        db.put("orders", "1", j(2), vec![], None, None).unwrap();
+
+        assert!(db.verify_root(rec.at_seq).is_verified(), "verifiable before the prune");
+
+        let tip = db.seq.load(Ordering::SeqCst).saturating_sub(1);
+        db.set_history_floor(tip).unwrap();
+
+        let v = db.verify_root(rec.at_seq);
+        assert_eq!(v.record, RecordStatus::Valid, "the record itself is still fine");
+        assert_eq!(
+            v.recomputation,
+            Recomputation::Unavailable(UnavailableReason::HistoryPruned),
+            "and the engine says plainly that it could not check it"
+        );
+        assert!(!v.is_verified(), "unavailable is not verified");
+        assert!(!v.is_mismatch(), "and it is not a mismatch either");
+        assert_eq!(v.exit_code(), 3, "its own exit code, distinct from pass and fail");
+    }
+
+    #[test]
+    fn roots_are_listed_in_sequence_order() {
+        let db = Db::in_memory();
+        for i in 0..12u64 {
+            db.put("c", &i.to_string(), j(i), vec![], None, None).unwrap();
+            db.create_root().unwrap();
+        }
+        let seqs: Vec<u64> = db.list_roots().iter().map(|r| r.at_seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort();
+        assert_eq!(seqs, sorted, "zero-padded ids must order numerically");
+        assert_eq!(seqs.len(), 12);
+    }
+
+    #[test]
+    fn a_root_survives_a_reopen(){
+        let dir = tempdir().unwrap();
+        let at;
+        let expected;
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            db.put("orders", "1", j(1), vec![], None, None).unwrap();
+            let r = db.create_root().unwrap();
+            at = r.at_seq;
+            expected = r.root.state_root.clone();
+            db.flush_all();
+        }
+        let db = Db::open(dir.path(), None).unwrap();
+        let got = db.get_root(at).expect("root record survives a reopen");
+        assert_eq!(got.root.state_root, expected);
+        assert!(db.verify_root(at).is_verified());
     }
 }

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from .cascade import BlobStore
 from . import snapshot as _snap
+from . import namespace as _ns
 from . import crypto as _crypto
 from .index import Indexes, tokenize
 from .log import Op, OpLog, ReplayError, GENESIS, blake, canon  # noqa: F401  (re-exported)
@@ -117,6 +118,10 @@ class NEDB:
         # caller (the concurrent Sequencer) issues ONE fsync per batch via flush()
         # — group commit. Default False keeps embedded/direct use durable per-op.
         self._defer_sync = False
+        # Collections already known to be registered. A CACHE, never the
+        # answer: `collections()` reads the registry. A stale cache can only
+        # cause a redundant registry check, never a wrong namespace.
+        self._known_collections: set = set()
         # Encryption: resolve TMK (arg > env) → load/create DEK → None if no TMK
         self._dek: Optional[bytes] = None
         resolved_tmk = _crypto.resolve_tmk(tmk)
@@ -472,6 +477,106 @@ class NEDB:
             return False         # already expired
         return True
 
+    # --- collection identity ------------------------------------------------
+    #
+    # Mirrors rust/nedb-v2/src/db.rs. See python/nedb/namespace.py for why the
+    # reference engine carries this too, and for the parity failure that made
+    # it necessary.
+
+    def _ensure_collection(self, coll: str) -> None:
+        """Record that a collection exists, if that is not already recorded.
+
+        Idempotent, and cheap after a collection's first write: a set hit. On a
+        miss it consults the registry itself before writing, so reopening a
+        database does not re-register everything in it.
+
+        ORDER MATTERS. The registry record is appended BEFORE the user's write,
+        exactly as `Db::put` does it in Rust — `validate` then `ensure` then the
+        write. The two engines assign the same sequence numbers to the same
+        writes only if they spend them in the same order, and the cross-engine
+        parity corpus compares absolute sequences.
+        """
+        if coll in self._known_collections:
+            return
+        existing = self.store.get(f"{_ns.COLLECTIONS}:{coll}")
+        if existing is not None:
+            # Registered already. Revive it if it was dropped and is being
+            # written to again — a write is an unambiguous assertion that the
+            # caller means for this collection to exist.
+            if existing.get("dropped"):
+                self._write_collection_record(coll, False)
+            self._known_collections.add(coll)
+            return
+        self._write_collection_record(coll, False)
+        self._known_collections.add(coll)
+
+    def _write_collection_record(self, coll: str, dropped: bool) -> None:
+        """Append a registry record.
+
+        Creation and drop are the same shape because they are the same kind of
+        event: an assertion, at a sequence, about whether a name is live. Goes
+        through the ordinary log so replication, AS OF and verification cover
+        it without being taught about it.
+        """
+        key = f"{_ns.COLLECTIONS}:{coll}"
+        doc = {"_id": coll, "name": coll, "dropped": dropped, "at_seq": self.seq}
+        nonce = self._next("engine")
+        op, created = self._log_append(
+            "engine", nonce, "put",
+            {"key": key, "coll": _ns.COLLECTIONS, "id": coll, "doc": doc},
+        )
+        if created:
+            apply_op(self.store, self.relations, self.indexes, op, self.cause_map)
+
+    def collections(self) -> List[str]:
+        """Every collection that currently exists.
+
+        THE authoritative answer. An emptied-but-created collection is present
+        here; that is the whole point. Derived from recorded events rather than
+        from which document keys happen to be live, so a collection does not
+        cease to exist because its last row was deleted.
+        """
+        live = []
+        prefix = f"{_ns.COLLECTIONS}:"
+        for key in self.store.keys(prefix):
+            rec = self.store.get(key)
+            if rec is None or rec.get("dropped"):
+                continue
+            name = rec.get("name")
+            if name is not None and not _ns.is_reserved(name):
+                live.append(name)
+        return sorted(live)
+
+    def collections_as_of(self, as_of: int) -> List[str]:
+        """Which collections existed as of a sequence. Versioned for free,
+        because the registry is ordinary documents in the log."""
+        live = []
+        prefix = f"{_ns.COLLECTIONS}:"
+        for key in self.store.keys(prefix):
+            rec = self.store.get(key, as_of)
+            if rec is None or rec.get("dropped"):
+                continue
+            name = rec.get("name")
+            if name is not None and not _ns.is_reserved(name):
+                live.append(name)
+        return sorted(live)
+
+    def drop_collection(self, coll: str) -> bool:
+        """Drop a collection: record that the name is no longer live.
+
+        A TOMBSTONE, not an erasure — the same contract `delete` has for
+        documents. Documents are left where they are; quietly destroying
+        history behind a namespace operation is exactly the behaviour the
+        engine refuses to have.
+        """
+        _ns.validate_writable(coll)
+        rec = self.store.get(f"{_ns.COLLECTIONS}:{coll}")
+        if rec is None or rec.get("dropped"):
+            return False
+        self._write_collection_record(coll, True)
+        self._known_collections.discard(coll)
+        return True
+
     # --- mutations ----------------------------------------------------------
     def put(self, coll: str, id: str, doc: dict, client: str = "local",
             nonce: Optional[int] = None, idem: Optional[str] = None,
@@ -481,6 +586,8 @@ class NEDB:
             confidence: Optional[float] = None,
             valid_from: Optional[str] = None,
             valid_to: Optional[str] = None) -> dict:
+        _ns.validate_writable(coll)
+        self._ensure_collection(coll)
         key = f"{coll}:{id}"
         doc = dict(doc)
         doc.setdefault("_id", id)
@@ -504,6 +611,9 @@ class NEDB:
 
     def delete(self, coll: str, id: str, client: str = "local",
                nonce: Optional[int] = None, idem: Optional[str] = None) -> None:
+        # Validated but NOT registered — deleting from a collection that does
+        # not exist should not bring it into existence. Matches `Db::delete`.
+        _ns.validate_writable(coll)
         key = f"{coll}:{id}"
         nonce = self._next(client) if nonce is None else nonce
         op, created = self._log_append(client, nonce, "delete",

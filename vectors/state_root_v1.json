@@ -1,0 +1,545 @@
+{
+  "format": "state_root_v1",
+  "hash": "blake2b-512 truncated to 32 bytes",
+  "note": "Any implementation of state_root_v1 must reproduce every expect block exactly. These pin the decisions prose cannot.",
+  "cases": [
+    {
+      "name": "empty_database",
+      "collections": [],
+      "records": [],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "a559d6038fdcb7520af3cf0a24f74d84fda925bbcc36723c4399ded80b67a88e",
+        "records_root": "fa64ea756a5e85ba58b35c1e60c38de9d0d88ba092b9522f4c802f02084087d8",
+        "state_root": "6f533dd36ec6299cf7c30be0c5e914d67da55e723537d7a71ac916fcb862a174",
+        "collection_count": 0,
+        "record_count": 0
+      }
+    },
+    {
+      "name": "one_empty_collection",
+      "collections": [
+        "orders"
+      ],
+      "records": [],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "331d151b862059187e10f0473e06ea3252b48e92542d96677f2fa528601ee9a0",
+        "records_root": "fa64ea756a5e85ba58b35c1e60c38de9d0d88ba092b9522f4c802f02084087d8",
+        "state_root": "6bad64a8e705fd521764e1fd1b90b3ab440a471dae39beb26a237bd638cac845",
+        "collection_count": 1,
+        "record_count": 0
+      }
+    },
+    {
+      "name": "two_empty_collections",
+      "collections": [
+        "a",
+        "b"
+      ],
+      "records": [],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "10fa72d6e456b7991e291a6b5a4100d09450fdf5dfb387449e3b4d9d4fef0784",
+        "records_root": "fa64ea756a5e85ba58b35c1e60c38de9d0d88ba092b9522f4c802f02084087d8",
+        "state_root": "e94807b111dbc2bc4f31973f43b731309fccc77c8750007c6c54ff5c1a4e48dd",
+        "collection_count": 2,
+        "record_count": 0
+      }
+    },
+    {
+      "name": "one_record",
+      "collections": [
+        "orders"
+      ],
+      "records": [
+        {
+          "coll": "orders",
+          "id": "1",
+          "data": {
+            "total": 100
+          },
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "331d151b862059187e10f0473e06ea3252b48e92542d96677f2fa528601ee9a0",
+        "records_root": "35c7363abe463740639470b9ec21ec734f17ec2b965d2d9ad884d41baeac1d3a",
+        "state_root": "819e895a42963897dfde58a0944afe79a10050794f05be3b7d3f1a485bf34af7",
+        "collection_count": 1,
+        "record_count": 1
+      }
+    },
+    {
+      "name": "three_records_odd_leaf",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "2",
+          "data": 2,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "3",
+          "data": 3,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "370b90c5b7c23a5db2405923c4113330f96bbc90b3a43e096dd9b05b2cd704d4",
+        "state_root": "2a0c41e9055dc34cf5fe3a86acf651209beb4a870a76c2d6d71579c8c4101ae3",
+        "collection_count": 1,
+        "record_count": 3
+      }
+    },
+    {
+      "name": "four_records_even",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "2",
+          "data": 2,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "3",
+          "data": 3,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "4",
+          "data": 4,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "a806a577d5e00ec17014ea015573233bd599f263e9bb672b2cca3bfb564980fa",
+        "state_root": "de95aeacb5c823c3e1bc03087b6b43936b3f9f60637d8ce7740bb466509b10c6",
+        "collection_count": 1,
+        "record_count": 4
+      }
+    },
+    {
+      "name": "five_records",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "2",
+          "data": 2,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "3",
+          "data": 3,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "4",
+          "data": 4,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "5",
+          "data": 5,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "f64c3a1d264901194ff93ae606f19712f07f250ff4c81b2343a086e08c9ad405",
+        "state_root": "c06442e678a87d6f09cbe909f1adad3d204d02e2fb3f0635ddef838a39de0979",
+        "collection_count": 1,
+        "record_count": 5
+      }
+    },
+    {
+      "name": "unsorted_input",
+      "collections": [
+        "z",
+        "a"
+      ],
+      "records": [
+        {
+          "coll": "z",
+          "id": "9",
+          "data": 9,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "a",
+          "id": "1",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "z",
+          "id": "1",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "530c2a336860ff5f5b52436fa9cfb73e3238e7277ecc30b10375c9d383d0cbe4",
+        "records_root": "7fcf09b34a44ff169e3ba0fa16ab46c659c572c23d9fdf0e369b52518cfd8efd",
+        "state_root": "8ab4a7fc6d4283d0e0b578040b7dfa7d7e7165cff10c9e263414b22f1ae196a9",
+        "collection_count": 2,
+        "record_count": 3
+      }
+    },
+    {
+      "name": "concatenation_ambiguity",
+      "collections": [],
+      "records": [
+        {
+          "coll": "ab",
+          "id": "c",
+          "data": null,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "a",
+          "id": "bc",
+          "data": null,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "a559d6038fdcb7520af3cf0a24f74d84fda925bbcc36723c4399ded80b67a88e",
+        "records_root": "290c2ed0323e8c9e7747c4af79ecf5e81acccbcd95da9f557c54061b52a282c5",
+        "state_root": "c83b88b27972ef2beb507af2de1265de311593631550389beaee3c5f9063629c",
+        "collection_count": 0,
+        "record_count": 2
+      }
+    },
+    {
+      "name": "field_order_preserved",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": {
+            "b": 1,
+            "a": 2
+          },
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "ec46bdac6c395484a5fe5e4585ab2e93808b57c0904a771882277a629e640df7",
+        "state_root": "c11103eea1127ca2b11247e8a61eea94af9612ba31ac780ef5c23e59356b6ee7",
+        "collection_count": 1,
+        "record_count": 1
+      }
+    },
+    {
+      "name": "integer_and_float",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "i",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "f",
+          "data": 1.0,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "87d45bb70a2f3eb688797010ca4d489912dd32b724d482ff2fd5fdf3fcbac7c4",
+        "state_root": "29bd91937531a2b7e8789c243c5e9e0f8fe54369974483f0dab2737c03b98ffa",
+        "collection_count": 1,
+        "record_count": 2
+      }
+    },
+    {
+      "name": "negative_and_large_numbers",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": -9223372036854775808,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "2",
+          "data": 18446744073709551615,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "3",
+          "data": -0.0,
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "4",
+          "data": 2.5e-10,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "f666785a8e3376ce427abcbe244577d8826ac55fa87c926dc03d6168270b2dc2",
+        "state_root": "3fc57f399c4043db90ebc3c1ede6788644c6b30d6c62f876d377a6189c67729a",
+        "collection_count": 1,
+        "record_count": 4
+      }
+    },
+    {
+      "name": "nested_structures",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "1",
+          "data": {
+            "a": [
+              1,
+              {
+                "b": null
+              },
+              [
+                true,
+                false
+              ]
+            ],
+            "z": {}
+          },
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "e6e91b19772e1d0ebd77dc06efdb8858a8b8eeee221340f16c2c2a0b75db9ac3",
+        "state_root": "8ba60a92471e3c4ceb8c5e1ff17d2fc2ae064933368898cd8cef435ce98ff6be",
+        "collection_count": 1,
+        "record_count": 1
+      }
+    },
+    {
+      "name": "empty_containers",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "arr",
+          "data": [],
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "obj",
+          "data": {},
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "str",
+          "data": "",
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "null",
+          "data": null,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "beded53233ca729650775c7379d81285cf9a480e87725f59623a004b39557b79",
+        "state_root": "6c5556867ff65a142ae1c94e234d45ab410c7b7bbcf0c0b8bc271ed4814a492f",
+        "collection_count": 1,
+        "record_count": 4
+      }
+    },
+    {
+      "name": "unicode_not_normalised",
+      "collections": [
+        "café",
+        "café"
+      ],
+      "records": [
+        {
+          "coll": "café",
+          "id": "é",
+          "data": "café",
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "café",
+          "id": "é",
+          "data": "café",
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "54b22d5a0b5977c32d8e13aacf05fc6d043c632b716fcc383f6ae481bd8f0aac",
+        "records_root": "c5c2486ca76a0e9db7b449c54df99df0062d048eb4c899ccc8ab68c1ada8a64d",
+        "state_root": "d51c138611ed8982a51944892abe344fe436999e36a29c16f9883dffa39543f2",
+        "collection_count": 2,
+        "record_count": 2
+      }
+    },
+    {
+      "name": "bitemporal",
+      "collections": [
+        "c"
+      ],
+      "records": [
+        {
+          "coll": "c",
+          "id": "none",
+          "data": {},
+          "valid_from": null,
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "empty_from",
+          "data": {},
+          "valid_from": "",
+          "valid_to": null
+        },
+        {
+          "coll": "c",
+          "id": "dated",
+          "data": {},
+          "valid_from": "2026-01-01",
+          "valid_to": "2026-12-31"
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "50f9ee7221cbb6c324e18d1e947488c6a906f0de40e4f9b70e81d0d60b303746",
+        "records_root": "5b33ed154bfaafc31be716943ca705fa670446097e0a6d66713b3ee81e33ab3a",
+        "state_root": "eb6f4435341beb54e9cba391171bad55ac5950643311cee97000a2d5c266e6bc",
+        "collection_count": 1,
+        "record_count": 3
+      }
+    },
+    {
+      "name": "emptied_collection",
+      "collections": [
+        "orders",
+        "users"
+      ],
+      "records": [
+        {
+          "coll": "users",
+          "id": "u",
+          "data": 1,
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "expect": {
+        "version": "state_root_v1",
+        "namespace_root": "506fd5c5dd8650b486abf5ce4d985e804d6243badeb22a0102e95ac6b1562eed",
+        "records_root": "b67fe87f27038f30abc8c2805ccc46506a383433557b4b056c21382091f16320",
+        "state_root": "4654f225f2b8665049c54991dd1e27276699e2c0a6cc8568dc416e65a9f6ece9",
+        "collection_count": 2,
+        "record_count": 1
+      }
+    }
+  ]
+}
