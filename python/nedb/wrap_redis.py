@@ -319,6 +319,11 @@ class NEDBSurface:
         # raise AttributeError on every install lacking the native wheel,
         # i.e. exactly the universal py3-none-any path.
         self._nedbd_mode: bool = False
+        # How many log ops the backend has already been handed. Set before any
+        # branch can call _reload(), because the early-return path (an empty
+        # stream) never reaches the assignment there — and an unset mark would
+        # be an AttributeError on the first write of a brand-new database.
+        self._persisted_ops: int = 0
 
         if nedbd_url:
             # Route all NEDB operations to a running nedbd server
@@ -383,16 +388,40 @@ class NEDBSurface:
                     apply_op(self._db.store, self._db.relations,
                              self._db.indexes, op, self._db.cause_map)
             self._db._nonce = dict(self._db.log._last_nonce)
+        # Whatever was just restored is already in the stream. Without this the
+        # next write would re-append the entire replayed history.
+        self._persisted_ops = len(self._db.log.ops) if hasattr(self._db, "log") else 0
 
     def _persist_last_op(self) -> None:
+        """Persist every op appended since the last call.
+
+        It used to persist only `ops[-1]`, on the assumption that one API
+        call appends exactly one op. That assumption broke the moment a
+        single `put` could append two — a collection's first write now emits
+        its registry record and then the document — and the failure was
+        silent in the worst way: the registry op was never written to the
+        stream, so a replay rebuilt a log whose `prev` links pointed at an op
+        that was not there, and `verify()` returned False on a database that
+        had never been touched by anything but NEDB itself.
+
+        A high-water mark instead of a count, so this stays correct no matter
+        how many ops any future engine operation appends. The mark only ever
+        advances over ops actually handed to the backend, so a failure part
+        way through leaves the rest to be retried rather than skipped.
+        """
         if self._nedbd_mode:
             return  # nedbd persists atomically on each HTTP call
         if not hasattr(self._db, "log"):
             return  # DAG backend persists itself (WAL + MANIFEST, atexit flush)
-        if self._db.log.ops:
-            last = self._db.log.ops[-1]
-            self._backend.append(json.dumps(last.to_dict()))
-            self._backend.publish_ops([json.dumps(last.to_dict())])
+        total = len(self._db.log.ops)
+        if total <= self._persisted_ops:
+            return
+        pending = self._db.log.ops[self._persisted_ops:total]
+        encoded = [json.dumps(op.to_dict()) for op in pending]
+        for line in encoded:
+            self._backend.append(line)
+        self._backend.publish_ops(encoded)
+        self._persisted_ops = total
 
     # ── Collection registration ───────────────────────────────────────────────
 
