@@ -2,20 +2,27 @@
 # SPDX-License-Identifier: BUSL-1.1
 # NEDB · © 2026 INTERCHAINED LLC × Eth-Interchained × Vex (Claude Opus 5)
 
-# neSQL CLI — build and test on GitHub-hosted runners, macOS included.
+# neSQL CLI — Linux and Windows. macOS runs on Codemagic.
 #
-# The macOS builds run HERE rather than on Codemagic. The engine's release
-# matrix uses Codemagic for its darwin artifacts because that predates
-# GitHub's arm64 macOS runners; for this crate there is nothing to justify an
-# external service. `macos-14` is Apple Silicon and `macos-13` is Intel, both
-# free for public repositories, and keeping the build next to the code means
-# a failure shows up on the pull request rather than in another dashboard.
+# This file originally carried macos-14 and macos-13 legs, on the argument
+# that a failure belongs on the pull request rather than in another
+# dashboard. That argument was right about WHERE a failure should surface and
+# wrong about what it costs to wait for it: the GitHub-hosted macOS pools
+# queue long enough that the Mac verdict lands well after the Linux and
+# Windows ones, and a signal that late has stopped being part of the loop.
+#
+# The Mac legs moved to the `nesql-cli-macos` workflow in codemagic.yaml,
+# which runs on an M2 Mac Mini that picks the job up immediately. Every other
+# Codemagic workflow in that file is tag-triggered and builds release
+# artifacts; that one is push-triggered, because it is a test run and has to
+# answer while the branch is still being worked on.
 #
 # Cross-platform is not decoration for a CLI. The argument parser, the exit
 # codes and the path handling are exactly the surfaces where a Unix-only
 # assumption hides, and the one that matters most — `nesql status` on a path
 # that does not exist must be exit 4 and must not create a database — is a
-# filesystem behaviour.
+# filesystem behaviour. Windows stays here precisely because it is the
+# platform most likely to break those.
 
 name: nesql-cli
 
@@ -59,10 +66,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, name: "linux x86_64" }
-          - { os: macos-14,      name: "macos arm64 (apple silicon)" }
-          - { os: macos-13,      name: "macos x86_64 (intel)" }
+          - { os: ubuntu-latest,  name: "linux x86_64" }
           - { os: windows-latest, name: "windows x86_64" }
+          # macOS is on Codemagic — see the note at the top of this file.
 
     steps:
       - uses: actions/checkout@v4
