@@ -3517,6 +3517,48 @@ fn try_catalog_select(
     // present, and it does it silently. The query `... orders AS OF 1 o JOIN
     // orders n ...` returned the CURRENT value for both sides and looked fine.
     let temporal: std::collections::HashMap<String, u64> = {
+        // Wall-clock markers (a quoted datetime in `AS OF SYSTEM TIME ''`)
+        // resolve to real sequences HERE, before the one-scan-per-name
+        // reconciliation, so two datetime spellings naming the same moment
+        // are equal — and a wall-clock + tip mix reports "at the tip and AS
+        // OF <seq>" honestly rather than leaking a tagged marker into the
+        // executor. Resolution is `Db::seq_at`: the last seq whose write-time
+        // is at or before the moment, over the ts index the cold scan fills.
+        let resolve_marker = |m: u64| -> Result<u64, Vec<u8>> {
+            if (m & crate::wallclock::WALL_CLOCK_FLAG) == 0 {
+                return Ok(m); // bare integer — a seq, untouched, backcompat
+            }
+            let moment = crate::wallclock::WallClock::from_marker(m)
+                .ok_or_else(|| err_msg("0A000", "invalid wall-clock marker"))?;
+            let db = db.ok_or_else(|| err_msg("0A000",
+                "AS OF SYSTEM TIME by datetime names a database; connect with one"))?;
+            if !db.ts_index_ready() {
+                return Err(err_msg("0A000", &format!(
+                    "the write-time index is not ready on this boot (warm start defers it). \
+                     Run `nedb-cli repair` or a cold scan, or AS OF a bare sequence number")));
+            }
+            match db.seq_at(moment.epoch_secs()) {
+                Some(seq) => Ok(seq),
+                None => {
+                    let floor = db.history_floor();
+                    // Distinguish "before anything" from "pruned" — the two
+                    // read differently to an operator (one is routine, the
+                    // other is the compaction tradeoff answering).
+                    if floor > 0 {
+                        Err(err_msg("0A000", &format!(
+                            "history at or before that moment is no longer available — \
+                             the store was compacted past it (history floor {}). \
+                             AS OF a bare sequence at or after the floor instead", floor)))
+                    } else {
+                        Err(err_msg("0A000", &format!(
+                            "no writes at or before that moment in this database — \
+                             nothing existed yet (the first write is at seq {}). \
+                             A timestamp answers about the past; there is no past here yet", 
+                            db.seq.load(std::sync::atomic::Ordering::SeqCst))))
+                    }
+                }
+            }
+        };
         // Gather every sequence each name is read at first, INCLUDING the
         // absent one, then judge. Deciding as we walk got this wrong: the
         // first arm of a self-join was judged before it had been recorded, so
@@ -3524,9 +3566,13 @@ fn try_catalog_select(
         let mut seen: std::collections::HashMap<String, Vec<Option<u64>>> =
             std::collections::HashMap::new();
         for t in sel.from.iter().chain(sel.joins.iter().map(|j| &j.table)) {
+            let resolved = match t.as_of {
+                Some(m) => Some(resolve_marker(m).map_err(|e| e)?),
+                None => None,
+            };
             seen.entry(catalog_name(&t.name).to_ascii_lowercase())
                 .or_default()
-                .push(t.as_of);
+                .push(resolved);
         }
         let mut out: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for (key, ats) in &seen {

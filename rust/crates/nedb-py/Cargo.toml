@@ -12,6 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nedb-engine = { path = "../../nedb-v2" }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 hex = "0.4"
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
