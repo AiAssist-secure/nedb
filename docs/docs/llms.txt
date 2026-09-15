@@ -1,0 +1,16 @@
+# NEDB Documentation (deep dives)
+
+GitBook-styled official docs for nedb-engine v8.0.0. Generated from tools/build_docs_site.py.
+
+- [Introduction](index.html): What NEDB is, what it guarantees, and a five-minute start.
+- [Provenance & Time](provenance.html): The four axes: what, when, true-when, why — and the three commitments.
+- [The Query Language (NQL)](nql.html): Full grammar reference: clauses, predicates, three-valued logic, aggregates.
+- [neSQL](nesql.html): PostgreSQL's grammar + NEDB's clauses, one evaluator, one router.
+- [Wire Protocols](protocols.html): HTTP/JSON, PostgreSQL wire (simple + extended), RESP2.
+- [Durability](durability.html): Flush contracts, crash boundaries, the v3 segment store, repair.
+- [Replication](replication.html): tip / since / scan_status, state roots, the SSE event stream.
+- [Cast — the AI planner](cast.html): A 3.33M-parameter local model that plans queries. Safety by construction.
+- [Clients & Adapters](clients.html): Embedded cores, the HTTP client, and the wrap_* audit family.
+- [CLI Tools](cli.html): nedb-cli, the nesql CLI, nedb-inspector — operating stores offline.
+- [Architecture](architecture.html): The OpLog, the deterministic fold, and three storage generations.
+- [Releasing](releasing.html): One tag, three distributions, every version file in lockstep.
