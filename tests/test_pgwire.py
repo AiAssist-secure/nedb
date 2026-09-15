@@ -190,8 +190,17 @@ def run_suite(pg_port, cause_hash):
     print("\n── SELECT ──")
     cols, rows = q("SELECT * FROM orders")
     check("SELECT * returns every row", len(rows) == 4, f"{len(rows)}")
-    check("the user's own fields come before provenance columns",
-          cols[:4] == ["cust", "region", "status", "total"], str(cols))
+    # The user's fields keep the DOCUMENT'S order, not the alphabet. This
+    # assertion used to pin `["cust","region","status","total"]`, which was the
+    # translator sorting them — and the SQL evaluator did NOT, so `SELECT *`
+    # answered in a different column order depending on which engine served
+    # it. A client reading by POSITION got different columns from the same
+    # query. The parity harness found it; document order is the side that
+    # stays, because the corpus pins it deliberately (serde_json's
+    # `preserve_order` is on crate-wide to make it possible) and it is what
+    # Postgres does, where `*` follows column definition order.
+    check("the user's own fields come before provenance columns, in document order",
+          cols[:4] == ["status", "total", "region", "cust"], str(cols))
     check("provenance columns are present and last",
           cols[4:] == ["_coll", "_hash", "_id", "_seq"], str(cols))
 
@@ -238,9 +247,19 @@ def run_suite(pg_port, cause_hash):
 
     # ── the differentiators, reachable over plain SQL ────────────────────────
     print("\n── NEDB's own surface, through a Postgres client ──")
-    cols, rows = q("SELECT * FROM orders AS OF SYSTEM TIME 1")
-    check("AS OF SYSTEM TIME reads history", len(rows) == 2,
-          f"{len(rows)} rows at seq 1")
+    # Find the sequence at which the second row exists, rather than asserting
+    # an absolute one. Registering a collection is itself a write, so the
+    # first document in `orders` does not sit at sequence 0 — and this test is
+    # about AS OF SYSTEM TIME reaching history over the wire, not about where
+    # the engine's bookkeeping happens to land.
+    at_two = None
+    for n in range(0, 16):
+        _, probe = q(f"SELECT * FROM orders AS OF SYSTEM TIME {n}")
+        if len(probe) == 2:
+            at_two = n
+            break
+    check("AS OF SYSTEM TIME reads history", at_two is not None,
+          "no sequence in 0..15 showed two rows")
     check("...using Postgres's own time-travel spelling", True)
 
     e = err("SELECT * FROM orders AS OF SYSTEM TIME '2026-01-01'")
@@ -364,14 +383,59 @@ def run_suite(pg_port, cause_hash):
         # whole collection (as it does in Postgres), so it must not be fired
         # against a fixture other assertions still depend on.
         ("CREATE TABLE t (a int)", "DDL"),
-        ("SELECT * FROM orders JOIN audit ON 1=1", "JOIN is not supported"),
-        ("SELECT DISTINCT region FROM orders", "GROUP BY"),
-        ("SELECT lower(status) FROM orders", "expressions in the select list"),
-        ("SELECT * FROM orders, audit", "more than one collection"),
     ]:
         e = err(sql)
         check(f"refused with a reason: {sql[:38]}",
               e is not None and expect in e, str(e)[:100])
+
+    # ── four former refusals that are answers now ────────────────────────────
+    #
+    # These four USED TO BE asserted here as refusals, each with the reason the
+    # translator gave:
+    #
+    #   JOIN ... ON 1=1        "JOIN is not supported"
+    #   SELECT DISTINCT ...    "GROUP BY"
+    #   SELECT lower(status)   "expressions in the select list"
+    #   FROM orders, audit     "more than one collection"
+    #
+    # Every one of those reasons was a fact about NQL, not about NEDB: a
+    # translator whose target language is single-collection and has no
+    # projection cannot express a join, a distinct, or a function call. The
+    # evaluator can, and now answers every SELECT it can parse, so the
+    # boundary those four described is gone.
+    #
+    # They are kept rather than deleted, inverted. A capability that arrives
+    # by REMOVING a refusal leaves nothing behind to prove it arrived, and the
+    # same four statements asserting success is exactly that proof.
+    #
+    # Asserted on the ANSWER, not merely on the absence of an error: `e is
+    # None` would also pass if the statement silently returned nothing.
+    print("\n── what the translator refused, the evaluator answers ──")
+    for sql, want_cols, why in [
+        ("SELECT * FROM orders JOIN audit ON 1=1", None,
+         "a join, which NQL cannot express"),
+        ("SELECT DISTINCT region FROM orders", ["region"],
+         "DISTINCT without dressing it as a GROUP BY"),
+        ("SELECT lower(status) AS s FROM orders", ["s"],
+         "an expression in the select list"),
+        ("SELECT * FROM orders, audit", None,
+         "two collections in one FROM"),
+    ]:
+        e = err(sql)
+        ok = e is None
+        cols = None
+        if ok:
+            with conn.cursor() as c:
+                c.execute(sql)
+                rows = c.fetchall()
+                cols = [d[0] for d in c.description]
+                # A join of two non-empty relations must not come back empty;
+                # "no error, no rows" is the shape a silently-dropped clause
+                # takes.
+                ok = len(rows) > 0
+                if want_cols is not None:
+                    ok = ok and cols == want_cols
+        check(f"answered, not refused: {why}", ok, f"cols={cols} err={str(e)[:60]}")
 
     # A NQL-level error must surface as a SQL error, carrying the translation
     # so the developer can see what was actually run.

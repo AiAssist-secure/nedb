@@ -169,14 +169,26 @@ def run_engine(label, eng):
 
     # ── time travel still works, and composes with the new predicates ────────
     print("\n── AS OF composes with the new predicate surface ──")
-    hist = eng.query("FROM jobs AS OF 0")
+    # The first USER write is not necessarily sequence 0: registering a
+    # collection is itself a write, so a collection's first document lands one
+    # position after its registry record — in both engines, which is the point
+    # of discovering the base rather than assuming it. These assertions are
+    # about AS OF walking the version chain, not about where the engine's own
+    # bookkeeping sits.
+    base = next((n for n in range(0, 16) if eng.query(f"FROM jobs AS OF {n}")), None)
+    check(f"{L} a first write is reachable by AS OF", base is not None,
+          "no sequence in 0..15 shows any row")
+    base = base or 0
+
+    hist = eng.query(f"FROM jobs AS OF {base}")
     check(f"{L} AS OF 0 returns the first write only",
           len(hist) == 1, f"{len(hist)} row(s)")
     check(f"{L} AS OF 0 returns the HISTORICAL value",
           hist and hist[0].get("status") == "open", str(hist))
-    # doc 1 was later updated to status=closed, fee=11. At seq 0 it is still
-    # open/10, so an IN predicate evaluated AS OF must see the old value.
-    old_in = eng.query('FROM jobs AS OF 0 WHERE status IN ("open")')
+    # doc 1 was later updated to status=closed, fee=11. At the first write it
+    # is still open/10, so an IN predicate evaluated AS OF must see the old
+    # value.
+    old_in = eng.query(f'FROM jobs AS OF {base} WHERE status IN ("open")')
     check(f"{L} a predicate AS OF sees the historical value", len(old_in) == 1,
           f"{len(old_in)} row(s)")
     new_in = eng.query('FROM jobs WHERE _id = "1" AND status IN ("open")')

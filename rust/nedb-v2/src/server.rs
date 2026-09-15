@@ -123,10 +123,24 @@ impl Manager {
         for key in keys {
             if let Some(mut entry) = self.subs.get_mut(&key) {
                 let (nql, last_hash, tx) = entry.value_mut();
-                // Re-run the query
-                let rows = match crate::nql::query(db_arc, nql) {
-                    Ok((rows, _)) => rows,
-                    Err(_) => continue,
+                // Re-run the query -- as neSQL, so a SQL subscription keeps
+                // working on every write and not just on the first evaluation.
+                let rows = match crate::nesql::run(db_arc, nql) {
+                    Ok(rows) => rows,
+                    Err(why) => {
+                        // NOT a silent `continue`. This arm used to swallow the
+                        // error, which made a subscription whose statement
+                        // stopped being valid look identical to one whose
+                        // result had not changed: no event, no complaint, and a
+                        // client waiting forever on a feed that had quietly
+                        // died. Say which subscription and why, once per write.
+                        eprintln!(
+                            "[nedbd] subscription {}/{} could not be re-evaluated \
+                             and will not update: {} (statement: {})",
+                            key.0, key.1, why, nql
+                        );
+                        continue;
+                    }
                 };
                 // Hash the result set
                 let new_hash = format!("{:?}", rows.iter().map(|r| r.to_string()).collect::<Vec<_>>());
@@ -298,7 +312,7 @@ async fn list_databases(State(mgr): State<Manager>, headers: HeaderMap) -> Respo
         names.iter().map(|n| {
             if let Some(db) = inner.dbs.get(n) {
                 let (seq, head) = db_seq_head(db);
-                json!({"name": n, "seq": seq, "head": head, "collections": db.id_index.collections()})
+                json!({"name": n, "seq": seq, "head": head, "collections": db.collections()})
             } else {
                 json!({"name": n})
             }
@@ -336,7 +350,7 @@ async fn get_database(
         None => err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
         Some(db) => {
             let (seq, head) = db_seq_head(&db);
-            ok(json!({"name": name, "seq": seq, "head": head, "collections": db.id_index.collections()}))
+            ok(json!({"name": name, "seq": seq, "head": head, "collections": db.collections()}))
         }
     }
 }
@@ -405,7 +419,7 @@ async fn cast_prompt(
 
     // The engine knows the real schema, so constrain against it. This is the
     // whole reason the planner lives here instead of in a client.
-    let collections = db.id_index.collections();
+    let collections = db.collections();
     let result = caster.cast_checked(&body.prompt, &collections);
 
     // Validate by PARSING, not by pattern-matching the text. The parser is the
@@ -504,14 +518,42 @@ async fn query_database(
         Some(db) => db,
     };
     if body.nql.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "nql is required");
+        return err(StatusCode::BAD_REQUEST, "a statement is required");
     }
-    match nql::query(&db, &body.nql) {
-        Ok((rows, count)) => {
-            let (seq, head) = db_seq_head(&db);
-            ok(json!({"rows": rows, "count": count, "seq": seq, "head": head}))
-        }
-        Err(e) => err(StatusCode::BAD_REQUEST, &format!("NQL error: {}", e)),
+    // THE FIELD IS STILL CALLED `nql`; ITS CONTENTS NO LONGER HAVE TO BE.
+    //
+    // This endpoint accepts neSQL — NQL or PostgreSQL SQL — and routes on the
+    // leading keyword, using the same `nesql::route` the CLI uses. The field
+    // name is kept because every existing HTTP client sends it, and renaming
+    // it would break them to gain nothing; what changed is what it accepts.
+    //
+    // A SQL statement sent here used to reach `nql::parse`, which reported
+    // something like `expected keyword FROM, got Ident("SELECT")` — an error
+    // about the wrong language, which reads as "NEDB does not understand
+    // SQL" when the truth was "this endpoint did not".
+    let dialect = match crate::nesql::route(&body.nql) {
+        Ok(d) => d,
+        Err(why) => return err(StatusCode::BAD_REQUEST, &why),
+    };
+    let (seq, head) = db_seq_head(&db);
+    match dialect {
+        crate::nesql::Dialect::Nql => match nql::query(&db, &body.nql) {
+            Ok((rows, count)) => ok(json!({
+                "rows": rows, "count": count, "seq": seq, "head": head,
+                "dialect": "nql",
+            })),
+            Err(e) => err(StatusCode::BAD_REQUEST, &format!("NQL error: {}", e)),
+        },
+        crate::nesql::Dialect::Sql => match crate::pgwire::execute_sql(&db, &body.nql, false) {
+            Ok(done) => {
+                let n = done.rows.len();
+                ok(json!({
+                    "rows": done.rows, "count": n, "seq": seq, "head": head,
+                    "dialect": "sql", "tag": done.tag,
+                }))
+            }
+            Err(why) => err(StatusCode::BAD_REQUEST, &format!("SQL error: {}", why)),
+        },
     }
 }
 
@@ -861,6 +903,96 @@ async fn verify_database(
     }))
 }
 
+// ── State roots over HTTP ─────────────────────────────────────────────────
+//
+// The root surface is exposed because the thing a root is FOR is comparing two
+// databases, and the two databases are usually on two machines. A root you can
+// only compute locally answers a question nobody was asking.
+
+async fn root_current(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    match db.state_root() {
+        Ok(r) => ok(serde_json::to_value(r).unwrap_or(json!({}))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+async fn root_list(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    ok(json!({
+        "roots": db.list_roots(),
+        "history_floor": db.history_floor(),
+    }))
+}
+
+async fn root_create(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath(name): AxPath<String>,
+    AxQuery(q): AxQuery<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    // `at` is explicit on purpose: a root at the tip is O(live state), a root
+    // in the past also walks a version chain per document. Backfill is not
+    // hidden behind the cheap call.
+    let at: Option<u64> = match q.get("at").map(|v| v.parse::<u64>()) {
+        None => None,
+        Some(Ok(v)) => Some(v),
+        Some(Err(_)) => return err(StatusCode::BAD_REQUEST, "at must be a sequence number"),
+    };
+    let made = match at {
+        Some(seq) => db.create_root_at(seq),
+        None => db.create_root(),
+    };
+    match made {
+        Ok(r) => ok(serde_json::to_value(r).unwrap_or(json!({}))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+async fn root_verify(
+    State(mgr): State<Manager>,
+    headers: HeaderMap,
+    AxPath((name, seq)): AxPath<(String, u64)>,
+) -> Response {
+    if !mgr.check_auth(&headers) { return err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let db = match mgr.get_db(&name).await {
+        None => return err(StatusCode::NOT_FOUND, &format!("database not found: {}", name)),
+        Some(db) => db,
+    };
+    let v = db.verify_root(seq);
+    // Deliberately 200 for every outcome including a mismatch. The three states
+    // -- verified, mismatched, unverifiable -- are the PAYLOAD, and collapsing
+    // them onto HTTP status codes would re-flatten exactly the distinction the
+    // verification exists to preserve.
+    ok(json!({
+        "verified":   v.is_verified(),
+        "mismatch":   v.is_mismatch(),
+        "exit_code":  v.exit_code(),
+        "result":     v,
+    }))
+}
+
 async fn checkpoint(
     State(mgr): State<Manager>,
     headers: HeaderMap,
@@ -1013,10 +1145,34 @@ async fn subscribe_query(
         Some(db) => db,
     };
 
+    // Route BEFORE registering. A statement that begins in neither half of
+    // neSQL cannot ever produce rows, so handing it a live subscription hands
+    // the client a feed that is indistinguishable from one whose result has
+    // simply not changed yet: connection open, no events, no complaint, no way
+    // to tell "your query is wrong" from "nothing happened". Refuse it here,
+    // while there is still an HTTP status to refuse with.
+    if let Err(why) = crate::nesql::route(&body.nql) {
+        return err(StatusCode::BAD_REQUEST, &why);
+    }
+
     let (sub_id, rx) = mgr.subscribe(&name, body.nql.clone());
 
     // Send the initial query result immediately as the first SSE event
-    if let Ok((rows, _)) = crate::nql::query(&db, &body.nql) {
+    // neSQL, not NQL: a subscription is a query like any other, and a client
+    // that can POST SQL to /query must be able to subscribe to it too.
+    //
+    // Routing already succeeded above, so a failure here is an EVALUATION
+    // failure — an unknown collection, a bad comparison. It is reported rather
+    // than dropped, for the same reason the route check is: a subscription that
+    // silently sends nothing looks exactly like a quiet one.
+    let initial = crate::nesql::run(&db, &body.nql);
+    if let Err(ref why) = initial {
+        eprintln!(
+            "[nedbd] subscription {}/{} opened but its first evaluation failed: {} (statement: {})",
+            name, sub_id, why, body.nql
+        );
+    }
+    if let Ok(rows) = initial {
         let init = json!({
             "sub_id": sub_id,
             "db":     &name,
@@ -1089,6 +1245,9 @@ pub fn router(mgr: Manager) -> Router {
         .route("/v1/databases/:name/batch",                      post(batch_operations))
         .route("/v1/databases/:name/index",                      post(create_index))
         .route("/v1/databases/:name/verify",                     get(verify_database))
+        .route("/v1/databases/:name/root",                       get(root_current).post(root_create))
+        .route("/v1/databases/:name/roots",                      get(root_list))
+        .route("/v1/databases/:name/roots/:seq/verify",          get(root_verify))
         .route("/v1/databases/:name/checkpoint",                 post(checkpoint))
         .route("/v1/databases/:name/log",                        get(get_log))
         .route("/v1/databases/:name/tip",                        get(tip_database))

@@ -159,11 +159,50 @@ impl NedbCore {
             .as_ref().map(node_to_json_str)
     }
 
+    /// Run **neSQL** — PostgreSQL SQL, or NQL. The parameter keeps its
+    /// `nqlStr` name because existing callers pass it; what CHANGED is what
+    /// it accepts.
+    ///
+    /// This was NQL-only, and an earlier version of this comment defended
+    /// that as avoiding the risk of widening an existing method. Wrong twice:
+    /// routing is STRUCTURAL and TOTAL (NQL begins `FROM`; PostgreSQL has no
+    /// `FROM`-initial statement), so there is no ambiguity to introduce — and
+    /// SQL is the FRONT DOOR. A binding that answered `SELECT who FROM orders`
+    /// with "expected keyword FROM" would reproduce, one layer down, the exact
+    /// "NEDB does not understand SQL" experience neSQL exists to end.
     #[napi]
     pub fn query(&self, nql_str: String) -> Result<Vec<String>> {
-        nql::query(&self.inner, &nql_str)
-            .map(|(rows, _)| rows.into_iter().map(|v| v.to_string()).collect())
-            .map_err(|e| Error::from_reason(e.to_string()))
+        self.nesql(nql_str)
+    }
+
+    /// `query()` under the language's own name. One implementation; `query`
+    /// delegates here.
+    ///
+    /// Routing comes from `nedb_engine::nesql::route`, the SAME function the
+    /// `nesql` CLI and `POST /query` use. Three front doors, one decision about
+    /// what a statement means.
+    #[napi]
+    pub fn nesql(&self, statement: String) -> Result<Vec<String>> {
+        use nedb_engine::nesql::{route, Dialect};
+        match route(&statement).map_err(Error::from_reason)? {
+            Dialect::Nql => nql::query(&self.inner, &statement)
+                .map(|(rows, _)| rows.into_iter().map(|v| v.to_string()).collect())
+                .map_err(|e| Error::from_reason(e.to_string())),
+            Dialect::Sql => {
+                let db = std::sync::Arc::new(self.inner.clone());
+                nedb_engine::pgwire::execute_sql(&db, &statement, false)
+                    .map(|d| d.rows.into_iter().map(|v| v.to_string()).collect())
+                    .map_err(Error::from_reason)
+            }
+        }
+    }
+
+    /// Which half of neSQL a statement is written in: `"nql"` or `"sql"`.
+    #[napi]
+    pub fn nesql_dialect(&self, statement: String) -> Result<String> {
+        nedb_engine::nesql::route(&statement)
+            .map(|d| d.name().to_string())
+            .map_err(Error::from_reason)
     }
 
     #[napi]

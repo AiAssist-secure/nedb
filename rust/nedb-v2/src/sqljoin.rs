@@ -286,6 +286,8 @@ fn walk(
                 walk(a, left, right, saw_left, saw_right, usable);
             }
         }
+        // An aggregate has no per-row value, so it can never be a hash key.
+        Expr::Agg { .. } => *usable = false,
         Expr::Case { operand, whens, else_ } => {
             if let Some(o) = operand {
                 walk(o, left, right, saw_left, saw_right, usable);
@@ -310,6 +312,24 @@ fn walk(
             for i in list {
                 walk(i, left, right, saw_left, saw_right, usable);
             }
+        }
+        Expr::Index { expr, index } => {
+            walk(expr, left, right, saw_left, saw_right, usable);
+            walk(index, left, right, saw_left, saw_right, usable);
+        }
+        Expr::ArrayLit(items) => {
+            for i in items {
+                walk(i, left, right, saw_left, saw_right, usable);
+            }
+        }
+        // A subquery's reads cannot be attributed to a side without running
+        // it, so an equality containing one is never a hash key.
+        Expr::Subquery(_) | Expr::Exists { .. } | Expr::ArrayQuery(_) | Expr::InSubquery { .. } => {
+            *usable = false
+        }
+        Expr::Quantified { left: l, right: r, .. } => {
+            walk(l, left, right, saw_left, saw_right, usable);
+            walk(r, left, right, saw_left, saw_right, usable);
         }
     }
 }

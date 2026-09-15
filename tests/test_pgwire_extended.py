@@ -186,12 +186,25 @@ def suite_psycopg3(pg_port):
 
             # An error mid-sequence must be reported and must not desynchronise
             # the connection — the next statement has to work.
+            # This used to assert the error said "JOIN", because the
+            # translator refused joins BY NAME — NQL is single-collection, so
+            # the join itself was the complaint. The evaluator performs joins,
+            # so the only thing wrong with this statement now is that `x` does
+            # not exist, and that is what it says.
+            #
+            # The assertion that matters is unchanged and is the one the
+            # comment above describes: an error mid-sequence is REPORTED
+            # (never a silent empty result) and does not desynchronise the
+            # connection. It now checks the error names the relation at
+            # fault, which is the more useful guarantee than naming a
+            # limitation we removed.
             try:
                 cur.execute("SELECT * FROM orders JOIN x ON true WHERE a = %s", (1,))
-                check("an unsupported statement is refused at Parse", False, "no error")
+                check("a bad relation mid-sequence is an error, not empty rows",
+                      False, "no error — a typo answered successfully")
             except Exception as e:                                  # noqa: BLE001
-                check("an unsupported statement is refused at Parse",
-                      "JOIN" in str(e), str(e)[:80])
+                check("a bad relation mid-sequence is an error, not empty rows",
+                      "x" in str(e) and "does not exist" in str(e), str(e)[:80])
 
         # A fresh cursor after the error proves the stream resynchronised on Sync.
         with conn.cursor() as cur:
@@ -216,9 +229,23 @@ def suite_psycopg3(pg_port):
 
             # THE assertion this whole endpoint exists for: a plain SQL UPDATE
             # through a plain SQL driver, and the previous value is still there.
-            cur.execute("SELECT total FROM orders AS OF SYSTEM TIME 0 WHERE _id = %s", ("1",))
+            # Sequence 0 is not necessarily the first user write — registering
+            # a collection is itself a write — so find the earliest sequence at
+            # which order "1" is visible rather than assuming one. The point of
+            # the assertion is that the ORIGINAL value survived an UPDATE made
+            # through a plain SQL driver, not where the engine's bookkeeping
+            # happens to sit.
+            _first = None
+            for _n in range(0, 16):
+                cur.execute(
+                    f"SELECT total FROM orders AS OF SYSTEM TIME {_n} WHERE _id = %s",
+                    ("1",))
+                _rows = cur.fetchall()
+                if _rows:
+                    _first = _rows
+                    break
             check("history survives writes made over the extended protocol",
-                  cur.fetchall() == [(120,)], "AS OF")
+                  _first == [(120,)], f"AS OF — got {_first}")
 
             cur.execute("DELETE FROM orders WHERE _id = %s RETURNING _id", ("x1",))
             check("DELETE … RETURNING with bound parameters",

@@ -149,9 +149,6 @@ def run_suite(cur):
     check("engine metadata is addressable as a column too",
           got.get("_seq") == "bigint", f"_seq -> {got.get('_seq')}")
 
-    # Checked without an aggregate on purpose: an aggregate over a catalogue
-    # table is refused (see the last section), so asking for MIN() here would
-    # be testing the refusal rather than the numbering.
     firsts = q("SELECT column_name, ordinal_position FROM information_schema.columns "
                "WHERE table_name = 'orders' ORDER BY ordinal_position LIMIT 1")
     check("ordinal_position is 1-based, as Postgres numbers columns",
@@ -244,9 +241,12 @@ def run_suite(cur):
     # ── clauses a catalogue cannot honour must be REFUSED ───────────────────
     section("a catalogue has no history — say so, do not fake it")
 
+    # All three qualifiers, because the SQL parser learned each of them at a
+    # different time and each one arrived able to be silently ignored here.
     for sql, why in [
         ("SELECT relname FROM pg_class AS OF SYSTEM TIME 0", "AS OF"),
-        ("SELECT COUNT(*) FROM pg_class", "an aggregate"),
+        ("SELECT relname FROM pg_class VALID AS OF '2026-01-01'", "VALID AS OF"),
+        ("SELECT relname FROM pg_class SEARCH 'orders'", "SEARCH"),
     ]:
         try:
             q(sql)
@@ -256,6 +256,20 @@ def run_suite(cur):
             # present-day rows, which is worse than refusing it.
             check(f"{why} on a catalogue table is refused",
                   "catalogue" in str(e), str(e)[:90])
+
+    # An aggregate over the catalogue used to be refused too. It is now a
+    # real answer — the SQL evaluator reduces `count(*)` over the relation it
+    # serves — because psql's publication and subscription queries aggregate
+    # (`string_agg`, `count`) and refusing them broke `\dRp+`.
+    n = q("SELECT COUNT(*) FROM pg_class")
+    check("COUNT(*) over the catalogue counts the relations it lists",
+          n == [(3,)], str(n))
+    agg = q("SELECT count(*) AS n, min(relname) AS lo, max(relname) AS hi, "
+            "string_agg(relname, ',') AS all FROM pg_class WHERE relname <> 'tables'")
+    check("count/min/max/string_agg reduce over the filtered rows",
+          agg == [(2, "drivers", "orders", "drivers,orders")], str(agg))
+    check("an aggregate over no rows is NULL, count is 0",
+          q("SELECT count(*), max(relname) FROM pg_class WHERE relname = 'nope'") == [(0, None)])
 
 
 def run_explain_suite(cur):
@@ -302,14 +316,25 @@ def run_explain_suite(cur):
           any("Seq Scan" in l
               for l in q("EXPLAIN ANALYZE SELECT nspname FROM pg_namespace")))
 
-    # A statement the SQL evaluator does NOT run must not be given a plan that
-    # describes a pipeline it never took.
+    # A USER COLLECTION NOW GETS A REAL PLAN.
+    #
+    # These two assertions used to require the opposite: that EXPLAIN over a
+    # user collection said "the NQL path runs this" and reported NO plan,
+    # because the SQL evaluator genuinely did not run the statement — the
+    # translator did, and inventing a pipeline the query never took would
+    # have been a lie in the one place a reader goes to find out what ran.
+    #
+    # The evaluator now answers every SELECT it can parse, so there is a real
+    # pipeline to report and refusing to report it would be the lie instead.
+    # The assertion is inverted rather than dropped: "EXPLAIN describes what
+    # actually ran" is the invariant in both worlds, and only the answer
+    # changed.
     user = q("EXPLAIN SELECT * FROM orders")
-    check("a statement the NQL path runs says so instead of inventing a plan",
-          any("NQL path" in l for l in user) and not any("Seq Scan" in l for l in user),
+    check("a user collection gets a real plan, not an apology",
+          any("Seq Scan" in l for l in user) and not any("NQL path" in l for l in user),
           f"{user}")
-    check("and it says WHY no plan is reported",
-          any("never executed" in l for l in user), f"{user}")
+    check("...naming the collection it scanned",
+          any("orders" in l for l in user), f"{user}")
 
     # The plan must describe the query asked about, not a cached one.
     a = q("EXPLAIN SELECT nspname FROM pg_namespace")

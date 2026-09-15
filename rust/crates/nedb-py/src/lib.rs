@@ -215,11 +215,63 @@ impl NedbCore {
         node.as_ref().map(node_to_json_str)
     }
 
+    /// Run **neSQL** — PostgreSQL SQL, or NQL. The parameter is still named
+    /// `nql` because every existing caller passes it positionally or by that
+    /// keyword; what CHANGED is what it accepts.
+    ///
+    /// This method used to be NQL-only, and an earlier version of this comment
+    /// defended that on the grounds that widening an existing method is risky.
+    /// That was wrong twice over.
+    ///
+    /// It was wrong on the facts: routing is STRUCTURAL and TOTAL. NQL's form
+    /// begins `FROM` and PostgreSQL has no statement form that begins with
+    /// `FROM`, so the leading keyword partitions the two vocabularies rather
+    /// than hinting at them. There is no ambiguity to introduce — valid NQL
+    /// behaves identically, and SQL goes from an error to an answer.
+    ///
+    /// And it was wrong on the direction: SQL is the FRONT DOOR. `POST /query`
+    /// keeps its `nql` field and accepts both for exactly this reason. A
+    /// binding that answered `SELECT who FROM orders` with "expected keyword
+    /// FROM" would be reproducing, one layer down, the precise experience —
+    /// "NEDB does not understand SQL" — that neSQL exists to end.
     #[pyo3(signature = (nql))]
     fn query(&self, nql: &str) -> PyResult<Vec<String>> {
-        nql::query(&self.inner, nql)
-            .map(|(rows, _)| rows.into_iter().map(|v| v.to_string()).collect())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        self.nesql(nql)
+    }
+
+    /// `query()` under the language's own name, for callers who prefer to be
+    /// explicit. One implementation; `query` delegates here.
+    ///
+    /// Routing comes from `nedb_engine::nesql::route`, the SAME function the
+    /// `nesql` CLI and `POST /query` use. Three front doors, one decision about
+    /// what a statement means — two would eventually disagree, and a
+    /// disagreement about MEANING shows up as nothing rather than as an error.
+    #[pyo3(signature = (statement))]
+    fn nesql(&self, statement: &str) -> PyResult<Vec<String>> {
+        use nedb_engine::nesql::{route, Dialect};
+        match route(statement).map_err(PyRuntimeError::new_err)? {
+            Dialect::Nql => nql::query(&self.inner, statement)
+                .map(|(rows, _)| rows.into_iter().map(|v| v.to_string()).collect())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string())),
+            Dialect::Sql => {
+                let db = std::sync::Arc::new(self.inner.clone());
+                nedb_engine::pgwire::execute_sql(&db, statement, false)
+                    .map(|d| d.rows.into_iter().map(|v| v.to_string()).collect())
+                    .map_err(PyRuntimeError::new_err)
+            }
+        }
+    }
+
+    /// Which half of neSQL a statement is written in: `"nql"` or `"sql"`.
+    ///
+    /// Exposed because a caller building a query UI needs to show the user what
+    /// their input was understood AS, and re-deriving that client-side would be
+    /// a second router.
+    #[pyo3(signature = (statement))]
+    fn nesql_dialect(&self, statement: &str) -> PyResult<String> {
+        nedb_engine::nesql::route(statement)
+            .map(|d| d.name().to_string())
+            .map_err(PyRuntimeError::new_err)
     }
 
     #[pyo3(signature = (frm, rel, as_of=None))]

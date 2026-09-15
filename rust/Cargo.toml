@@ -6,6 +6,7 @@ members = [
     "crates/nedb-node",
     "crates/nedb-wrap",
     "nedb-v2",
+    "nesql-cli",
 ]
 
 # A bare `cargo build` at the workspace root builds the ENGINE, not the language
@@ -32,7 +33,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "4.1.1"
+version = "8.0.0"
 edition = "2021"
 license = "BUSL-1.1"
 repository = "https://github.com/Eth-Interchained/nedb"

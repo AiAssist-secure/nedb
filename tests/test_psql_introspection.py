@@ -35,14 +35,23 @@ versions, and it is full of constructs nobody would write by hand
 (`OPERATOR(pg_catalog.~)`, `COLLATE pg_catalog."C"`, `E'\\n'`). So the binary
 runs, and its exit status and output are the verdict.
 
-# What is NOT supported, asserted as such
+# The whole `\\d` family
 
-`\\dp`, `\\dT` and `\\d <table>` need the `ARRAY(...)` constructor, subqueries,
-and regex groups. Each is refused with an error NAMING the construct — checked
-below, because the error a developer reads is part of the product. They were
-previously told "JOIN is not supported", which stopped being true the moment
-joins started working: a wrong explanation is worse than a blunt one, because
-it sends the reader to fix the wrong thing.
+`\\dp`, `\\dT` and `\\d <table>` used to be refused by name — they need the
+`ARRAY(...)` constructor, correlated subqueries, `EXISTS`, `= ANY(...)` and
+regex groups (`^(orders)$`). All of that now runs, along with `UNION ALL` over
+a derived table (`\\dd`), `LATERAL` (`\\dP+`), `IS DISTINCT FROM` (`\\dconfig`)
+and aggregates. So the suite drives EVERY psql 17 backslash-describe command
+and asserts exit 0. Two exit 1 on a fresh Postgres too (`\\dx+`, `\\dRp+`:
+psql's own "Did not find any ..." when a `+` listing is empty) and are
+asserted as exactly that, not skipped.
+
+`GROUP BY`, `HAVING` and `array_agg(x ORDER BY y)` landed with SQLAlchemy's
+reflection, which is built on all three. What remains refused, by name: set
+operations and window functions on the user-collection path, and a derived
+table in `FROM` unless it is the `count(*)` shape every ORM writes for
+`.count()` — which is rewritten to a flat count only when the two counts must
+provably agree.
 
 Run: python3 tests/test_psql_introspection.py
 """
@@ -210,24 +219,62 @@ def main():
             ok, out, err = run_psql(pg_port, cmd)
             check(f"psql {cmd} exits 0 — {why}", ok, err.strip()[:110])
 
-        # ── the boundaries, and the QUALITY of the refusal ──────────────────
-        section("what is refused, and whether the message is true")
+        # ── the three that used to be refused ───────────────────────────────
+        section(r"\dp, \dT and \d <table> — subqueries, ARRAY(), regex groups")
 
-        for cmd, needle in [
-            (r"\dp", "ARRAY"),
-            (r"\dT", "subquery"),
-            (r"\d orders", "regex"),
+        ok, out, err = run_psql(pg_port, r"\d orders")
+        check(r"psql \d orders exits 0 (regex ^(orders)$, three scalar subqueries)",
+              ok, err.strip()[:150])
+        check(r"\d orders lists the observed fields as columns",
+              "status" in out and "total" in out, out.strip()[:200])
+        check(r"\d orders types them the way the wire does (total is bigint)",
+              "bigint" in out, out.strip()[:200])
+        check(r"\d orders shows engine metadata columns too (_seq)",
+              "_seq" in out, out.strip()[:200])
+        # psql exits 1 for a relation it cannot find, on Postgres too — the
+        # point is that the message is psql's own, not an engine ERROR.
+        ok, out, err = run_psql(pg_port, r"\d nosuch")
+        check(r"\d nosuch is psql's own 'Did not find', not an engine error",
+              not ok and "Did not find any relation" in (out + err) and "ERROR" not in err,
+              (out + err).strip()[:150])
+
+        ok, out, err = run_psql(pg_port, r"\dp")
+        check(r"psql \dp exits 0 (two ARRAY(SELECT ...) columns, = ANY)", ok, err.strip()[:150])
+        check(r"\dp lists both tables with empty privileges",
+              "orders" in out and "drivers" in out and "(2 rows)" in out, out.strip()[:200])
+
+        ok, out, err = run_psql(pg_port, r"\dT")
+        check(r"psql \dT exits 0 (correlated subquery + NOT EXISTS)", ok, err.strip()[:150])
+        # Every type NEDB advertises lives in pg_catalog, which psql filters
+        # out — so the honest listing is empty, not a fabricated user type.
+        check(r"\dT lists no user-defined types", "(0 rows)" in out, out.strip()[:200])
+
+        # ── the whole describe family ───────────────────────────────────────
+        section("every psql 17 backslash-describe command exits 0")
+
+        for cmd in [
+            r"\d", r"\d+", r"\d+ orders", r"\dp orders", r"\dT+", r"\dd", r"\dD",
+            r"\ds", r"\dE", r"\dc", r"\dC", r"\do", r"\dO", r"\dL", r"\dy", r"\dF",
+            r"\dA", r"\db", r"\dl", r"\dP", r"\dP+", r"\dRp", r"\dRs", r"\drds",
+            r"\dX", r"\dt+", r"\df+", r"\l+", r"\dn+", r"\du+", r"\dconfig", r"\z",
+            r"\dS+", r"\dt public.*", r"\d *ord*", r"\dg+", r"\dD+", r"\des", r"\det",
+            r"\deu", r"\dew", r"\dL+", r"\dm+", r"\di+", r"\ds+", r"\dv+", r"\dy+",
+            r"\dX+", r"\dl+", r"\dA+", r"\dd+", r"\dFp", r"\dFd", r"\dFt",
+            r"\dAc", r"\dAf", r"\dAo", r"\dAp",
         ]:
             ok, out, err = run_psql(pg_port, cmd)
-            check(f"psql {cmd} is refused rather than answered wrongly", not ok,
-                  out.strip()[:100])
-            # The error a developer reads is part of the product. These were
-            # previously told "JOIN is not supported", which stopped being
-            # true the moment joins started working.
-            check(f"…and the error NAMES the real construct ({needle})",
-                  needle.lower() in err.lower(), err.strip()[:150])
-            check(f"…and no longer blames JOIN, which now works",
-                  "JOIN is not supported" not in err, err.strip()[:150])
+            check(f"psql {cmd} exits 0", ok, err.strip()[:120])
+
+        # psql itself exits 1 when a `+` listing finds nothing to describe —
+        # identical against a fresh Postgres. Asserted as psql's message, so a
+        # real error here could never hide behind "expected to fail".
+        for cmd, msg in [(r"\dx+", "Did not find any extensions"),
+                         (r"\dRp+", "Did not find any publications"),
+                         (r"\dF+", "Did not find any text search configurations")]:
+            ok, out, err = run_psql(pg_port, cmd)
+            check(f"psql {cmd} is psql's own empty-listing exit, not an engine error",
+                  not ok and msg in (out + err) and "ERROR" not in err,
+                  (out + err).strip()[:150])
 
         # ── the SQL features themselves, through a driver ───────────────────
         try:
@@ -298,25 +345,85 @@ def main():
 
         # And the BOUNDARY, asserted rather than implied. A user table on its
         # own stays on the NQL path, which has the index pushdown, AS OF and
-        # TRACE — and which has no table aliases. Routing every query through
-        # the nested-loop engine to gain aliases would trade a real planner
-        # for a cosmetic feature, so the limit is deliberate.
+        # TRACE. Routing every query through the nested-loop engine would trade
+        # a real planner for a cosmetic feature, so the limit is deliberate.
         check("a plain user-collection query still works (the NQL path)",
               sorted(q("SELECT status FROM orders")) == [("open",), ("paid",)])
+
+        # ── qualifiers and aliases on the NQL path ──────────────────────────
+        # This block used to assert that an alias was REFUSED. It is now
+        # handled, and the reason matters: NQL looks a field up FLAT, so
+        # `WHERE orders.status = 'paid'` asked for a field literally named
+        # "orders.status", found none, and returned ZERO ROWS — silently. Every
+        # ORM qualifies its predicates, so every filtered query answered empty
+        # and read exactly like "you have no data".
+        check("a QUALIFIED column in WHERE finds its field (was: silently zero rows)",
+              q("SELECT _id FROM orders WHERE orders.status = 'paid'") == [("1",)],
+              str(q("SELECT _id FROM orders WHERE orders.status = 'paid'")))
+        check("a table ALIAS works as a qualifier",
+              q("SELECT o.status FROM orders o WHERE o.total > 100") == [("paid",)],
+              str(q("SELECT o.status FROM orders o WHERE o.total > 100")))
+        check("`AS alias` works too",
+              q("SELECT o.status FROM orders AS o WHERE o.total > 100") == [("paid",)])
+        check("a qualified ORDER BY sorts on the field",
+              q("SELECT orders.total FROM orders ORDER BY orders.total DESC")
+              == [(120,), (40,)])
+        # A dot inside a LITERAL is data, not a qualifier.
+        check("a dot inside a string literal is left alone",
+              q("SELECT _id FROM orders WHERE status = 'pa.id'") == [])
+        # A qualifier naming neither the collection nor its alias is an ERROR.
+        # Stripping it would answer from the one relation that IS present —
+        # a different wrong answer in the same empty-looking clothes.
         try:
-            q("SELECT t.status FROM orders t")
-            check("a user table ALIAS is refused, not silently mishandled",
-                  False, "it answered — the NQL path gained aliases?")
+            q("SELECT _id FROM orders WHERE nosuch.status = 'paid'")
+            check("an unknown qualifier is refused, not answered from the wrong relation",
+                  False, "it answered")
         except Exception as e:                                      # noqa: BLE001
-            check("a user table ALIAS is refused, not silently mishandled",
-                  "unexpected" in str(e).lower(), str(e).strip()[:100])
+            check("an unknown qualifier is refused, not answered from the wrong relation",
+                  "no table or alias named" in str(e), str(e).strip()[:110])
+
+        # ── what an ORM actually emits ──────────────────────────────────────
+        # A grouped query with a mixed select list, and `.count()`'s derived
+        # table. Both were refused until the select list was parsed item by
+        # item and the aggregate was placed where NQL wants it.
+        check("a grouped query with a MIXED select list works",
+              sorted(q("SELECT orders.status, count(*) AS n FROM orders "
+                       "GROUP BY orders.status")) == [("open", 1), ("paid", 1)],
+              str(q("SELECT orders.status, count(*) AS n FROM orders GROUP BY orders.status")))
+        check("a named aggregate rides along with count",
+              sorted(q("SELECT status, count(*) AS n, sum(total) AS t FROM orders "
+                       "GROUP BY status")) == [("open", 1, 40), ("paid", 1, 120)],
+              str(q("SELECT status, count(*) AS n, sum(total) AS t FROM orders GROUP BY status")))
+        check("count(*) over a derived table is flattened (every ORM's .count())",
+              q("SELECT count(*) AS count_1 FROM "
+                "(SELECT orders._id FROM orders WHERE orders.status = 'paid') AS anon_1")
+              == [(1,)],
+              str(q("SELECT count(*) AS count_1 FROM (SELECT orders._id FROM orders "
+                    "WHERE orders.status = 'paid') AS anon_1")))
+        # ...but only when the two counts MUST agree. A LIMIT inside would make
+        # them different numbers, so it is refused rather than flattened.
+        # ...and when the two counts would DIFFER, the answer is the DERIVED
+        # table's count, which is the correct one.
+        #
+        # This used to assert a REFUSAL. The translator flattened a derived
+        # table into the outer query, so a LIMIT inside would have been
+        # dropped and the count silently overstated — refusing was the only
+        # honest option it had. The evaluator actually evaluates the
+        # subquery, so there is nothing to flatten and nothing to refuse.
+        #
+        # Both spellings are asserted together, because the bug this guards
+        # against is the two agreeing when they should not.
+        check("a derived table's LIMIT is respected by the outer count",
+              q("SELECT count(*) FROM (SELECT _id FROM orders LIMIT 1) AS a") == [(1,)]
+              and q("SELECT count(*) FROM (SELECT _id FROM orders) AS a") == [(2,)],
+              str(q("SELECT count(*) FROM (SELECT _id FROM orders LIMIT 1) AS a")))
 
         # The engine refuses rather than guessing — asserted through the wire,
         # because an error that never reaches the client is not a boundary.
         for sql, needle in [
             ("SELECT nosuchfn(1) FROM pg_class", "not implemented"),
             ("SELECT relname FROM pg_class ORDER BY 9", "out of range"),
-            ("SELECT relname FROM pg_class WHERE relname ~ 'a+b'", "does not implement"),
+            ("SELECT relname FROM pg_class WHERE relname ~ 'a{2}'", "interval"),
         ]:
             try:
                 q(sql)
