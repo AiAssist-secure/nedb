@@ -16,7 +16,7 @@ at the same version on the same tag.
 [![nedb-engine-client npm](https://img.shields.io/npm/v/nedb-engine-client?label=nedb-engine-client&color=34d399)](https://www.npmjs.com/package/nedb-engine-client)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-f59e0b)](https://github.com/Eth-Interchained/nedb/blob/master/LICENSE) [![Free under $1M revenue](https://img.shields.io/badge/free%20under%20%241M%20revenue-22c55e)](https://github.com/Eth-Interchained/nedb/blob/master/LICENSE)
 
-**[Studio → studio.interchained.org](https://studio.interchained.org)**  ·  **[nedb.aiassist.net](https://nedb.aiassist.net)**
+**[Studio → studio.interchained.org](https://studio.interchained.org)**  ·  **[nedb.aiassist.net](https://nedb.aiassist.net)**  ·  **[neSQL → the language](https://github.com/Eth-Interchained/neSQL)**
 
 > ## 🟢 Free in production under $1M revenue
 > NEDB is licensed under the **Business Source License 1.1** (since 4.0.0). If your organisation's annual
@@ -29,6 +29,101 @@ at the same version on the same tag.
 > automatically and permanently. See [`LICENSE`](LICENSE).
 
 </div>
+
+---
+
+## Provenance — the reason NEDB exists
+
+Every database stores *what*. NEDB stores *what*, *when*, *when it was true*, and *why* — all sealed
+in a cryptographic hash chain that proves none of it was tampered with.
+
+Two time axes, one causal graph, one hash chain:
+
+| Question | Clause / field | Answers |
+|---|---|---|
+| *What* is the value? | the row itself | current state |
+| *When was it written?* | `AS OF <seq>` — transaction time | "set to 999 at seq 41" |
+| *When was it true in the world?* | `VALID AS OF "<date>"` — valid time | "the 2024 rate" |
+| *Why did it happen?* | `caused_by` → `TRACE caused_by` | the exact parent writes |
+| *What did it cause?* | `TRACE caused_by REVERSE` | forward consequence |
+| *Can I prove any of this to a third party?* | `verify()` · Merkle head · `proof()` | yes — locally, without trusting the server |
+
+```python
+from nedb import NEDB
+
+db = NEDB("./mydata")
+
+# Transaction time — the value at any past sequence, forever (no garbage collection)
+snap = db.seq
+db.put("users", "alice", {"age": 32})
+db.get("users", "alice", as_of=snap)               # → the prior version
+
+# Valid time — what the world believed on a date, regardless of when written
+db.put("policy", "rate_2024", {"pct": 5.0}, valid_from="2024-01-01", valid_to="2024-12-31")
+db.query('FROM policy VALID AS OF "2024-06-15"')   # → rate 5.0
+
+# Both axes at once — what did the system KNOW at seq 200 about 2024-02-15?
+db.query('FROM policy AS OF 200 VALID AS OF "2024-02-15"')
+
+# Causal provenance — an edge, not a comment
+db.put("inputs", "msg_1", {"text": "user prefers dark mode"})
+seq_msg = db.seq
+db.put("beliefs", "dark_mode", {"value": True},
+       caused_by=[seq_msg], evidence="user_message", confidence=0.95)
+
+db.query('FROM beliefs WHERE _id = "dark_mode" TRACE caused_by')     # → msg_1
+db.query('FROM inputs WHERE _id = "msg_1" TRACE caused_by REVERSE')  # → dark_mode
+
+# Tamper evidence — a 64-char BLAKE2b Merkle head on every write, verifiable offline
+assert db.verify()
+```
+
+Provenance travels with the row, and it is **selectable like any other column** — `_id`, `_hash`,
+`_seq`, `_coll` on every document, `_caused_by` / `_valid_from` / `_valid_to` where set:
+
+```sql
+SELECT _id, _hash, _seq FROM audit ORDER BY _seq;
+SELECT _id FROM audit TRACE caused_by;              -- works in NQL and in SQL
+INSERT INTO audit (_id, _caused_by, kind) VALUES ('leaf', '<parent-hash>', 'reprice');
+```
+
+One hash that commits to **what a database currently says** — independent of the route it took to
+get there — is a separate primitive, and it is specified, versioned, and test-locked across both
+engines: see [`docs/state-root-v1.md`](docs/state-root-v1.md) and
+[`vectors/state_root_v1.json`](vectors/state_root_v1.json). The running Merkle head commits to
+*history*; the state root commits to *now*; replica agreement and drift detection compare roots.
+
+**The chain is not a side feature — it is the write path.** A SQL `UPDATE` is a new version, a SQL
+`DELETE` is a tombstone, and `verify()` still passes afterwards, because writes through any surface
+are ordinary engine writes. There is no configuration that silently drops history.
+
+---
+
+## The four-axis model
+
+| Axis | Mechanism | Other databases |
+|---|---|:---:|
+| **What** — current state | content-addressed objects, BLAKE2b-verified on every read | the only axis they have |
+| **When** — transaction time | every version retained, `AS OF <seq>` | ❌ |
+| **True-when** — valid time | bi-temporal fields, `VALID AS OF "<date>"` | ❌ |
+| **Why** — causal provenance | `caused_by` edges in the DAG, `TRACE` both directions | ❌ |
+
+SQLite, Redis and MongoDB store *what*. Add triggers and you have written a side table no query
+optimizer knows about, with no chain and no proof. NEDB's provenance is native, indexed,
+traversable — and the same hash chain that keeps it honest also protects it.
+
+### The comparison table
+
+| Capability | NEDB | SQLite | Redis | MongoDB |
+|---|:---:|:---:|:---:|:---:|
+| Hash-chained tamper evidence | ✅ | ❌ | ❌ | ❌ |
+| Time-travel reads (`AS OF seq`) | ✅ | ❌ | ❌ | ❌ |
+| Bi-temporal (`VALID AS OF date`) | ✅ | ❌ | ❌ | ❌ |
+| Causal Write Provenance | ✅ | ❌ | ❌ | ❌ |
+| Replay-protected idempotent writes | ✅ | ❌ | ❌ | ❌ |
+| SQL + Redis + MongoDB adapters | ✅ | — | — | — |
+| Concurrent group-commit daemon | ✅ | ❌ | ✅ | ✅ |
+| At-rest AES-256-GCM encryption | ✅ | ❌ | ❌ | — |
 
 ---
 
@@ -76,7 +171,7 @@ evaluator with no flag to set, the `nesql` CLI likewise.
 [![neSQL on crates.io](https://img.shields.io/crates/v/nesql?label=nesql%20·%20crates.io&color=a855f7)](https://crates.io/crates/nesql)
 [![neSQL on npm](https://img.shields.io/npm/v/nesql-engine?label=nesql-engine%20·%20npm&color=a855f7)](https://www.npmjs.com/package/nesql-engine)
 
-Those three badges read **0.0.1** next to an engine at 6.1.0, and that is
+Those three badges read **0.0.1** next to an engine at 8.0.0, and that is
 deliberate rather than neglected. They are **reserved names**: each package loads,
 reports the vendored PostgreSQL release, and answers `is_release() == false`,
 because a package that imports cleanly and then lies is worse than one that is not
@@ -86,8 +181,8 @@ both halves of the grammar and the CLI's source, side by side.
 
 ### `nesql` — the CLI, and it speaks neSQL
 
-Ships in this release, no flag. `nesql` opens a store directly — no daemon, no
-port — and answers both halves of the language through **one** `query` command:
+Ships inside `pip install nedb-engine` — no daemon, no port — and answers both
+halves of the language through **one** `query` command:
 
 ```console
 $ nesql --db ./store query "SELECT who, total FROM orders ORDER BY total DESC"
@@ -359,12 +454,6 @@ a seq is exact where a time would be approximate.
     compacted store answers "not available at that sequence" rather than
     returning a stale value, and `verify()` stays clean.
 
-Provenance is selectable like any other column:
-
-```sql
-SELECT _id, _hash, _seq FROM audit ORDER BY _seq;
-```
-
 **NEDB speaks SQL. That sentence used to carry a caveat, and no longer does.**
 
 For most of this project's life it was true that the endpoint served a
@@ -398,42 +487,6 @@ The `⛔️` row is the one that is not a limitation. `TRUNCATE` is refused beca
 NEDB is append-only *so that history cannot be discarded* — that is the product,
 not a gap — and DDL is refused because collections are created by the first write
 to them. Those answers do not change.
-
-### Every other row on that table was a translation artefact — and they are gone
-
-> ### 🆕 [**neSQL**](https://github.com/Eth-Interchained/neSQL) — PostgreSQL's grammar, NEDB's memory
->
-> Those refusals were never the engine's limits. `sqlselect.rs` has had
-> nested-loop and hash joins, subqueries, `EXISTS`, quantified comparisons, set
-> operations, `array_agg(x ORDER BY y)` and derived tables for some time — they
-> were simply unreachable *through a translator*, because the translator's
-> target was NQL. They are reachable now, with nothing to set.
->
-> neSQL vendors PostgreSQL's **real grammar** — `gram.y`, 19,513 lines and 492
-> keywords, from 17.4, licence intact — and extends it with the clauses NEDB
-> needs, rather than rewriting SQL into a language that cannot express it.
->
-> It is worth knowing *why* the temporal clauses were never free: `SYSTEM_TIME`,
-> `PERIOD` and `PORTION` appear **zero** times in PostgreSQL's grammar. Postgres
-> has no temporal SQL at all, and `AS OF SYSTEM TIME` is a CockroachDB
-> extension — so NEDB's temporal clauses are additions *to* the vendored grammar
-> rather than deviations *from* it. The same road CockroachDB, Materialize and
-> RisingWave took. What the grammar does hand over free: `WITH RECURSIVE`,
-> window functions, `GROUPING SETS` and `MERGE`.
->
-> ```bash
-> pip install nesql   ·   cargo add nesql   ·   npm install nesql-engine
-> ```
->
-> Those three are **reserved names**, not a product: each loads and answers
-> `is_release() == false`, because a package that imports cleanly and then lies
-> is worse than one that isn't published. The engine is what ships today, and
-> neSQL will be this same engine under its own name.
->
-> **NQL is not being deleted, and it is not being wrapped.** Its verbs are SQL
-> clauses now — `AS OF SYSTEM TIME`, `VALID AS OF`, `SEARCH` — parsed by the SQL
-> side and executed by the NQL engine. One implementation, two front-ends,
-> neither one a second-class guest.
 
 Every refusal names the boundary instead of saying "syntax error", and a
 grouped query that projects a column SQL would reject gets Postgres's own
@@ -787,222 +840,72 @@ The deployment figures below are a **dated snapshot**, not a live readout: **1,3
 
 ---
 
-## What makes NEDB different
+## Performance — every number dated and reproducible
 
-Every database stores *what*. NEDB stores *what*, *when*, *when it was true*, and *why* — all sealed in a cryptographic hash chain that proves none of it was tampered with.
+NEDB is benchmarked honestly: the machine is named, the command is in the repo, and a number you cannot reproduce is a number we do not print. Absolute figures are **not** cross-machine comparable — read the ratios.
 
-| Capability | NEDB | SQLite | Redis | MongoDB |
-|---|:---:|:---:|:---:|:---:|
-| Hash-chained tamper evidence | ✅ | ❌ | ❌ | ❌ |
-| Time-travel reads (`AS OF seq`) | ✅ | ❌ | ❌ | ❌ |
-| Bi-temporal (`VALID AS OF date`) | ✅ | ❌ | ❌ | ❌ |
-| Causal Write Provenance | ✅ | ❌ | ❌ | ❌ |
-| Replay-protected idempotent writes | ✅ | ❌ | ❌ | ❌ |
-| SQL + Redis + MongoDB adapters | ✅ | — | — | — |
-| Concurrent group-commit daemon | ✅ | ❌ | ✅ | ✅ |
-| At-rest AES-256-GCM encryption | ✅ | ❌ | ❌ | — |
+**Embedded core (Rust engine, in-process) — `bench/RESULTS.md`, 2026-06-14, Linux x86-64, Python 3.9.25.
+Reproduce: `python3 bench/benchmarks.py --save`**
 
----
+| Operation | Throughput | Latency (avg) |
+|-----------|-----------|---------------|
+| PUT (replace, no index) | **63.5K/s** | 15.74 µs |
+| GET (point read, HEAD) | **1.33M/s** | 0.75 µs |
+| GET (`AS OF` — time-travel read) | **942.9K/s** | 1.06 µs |
+| QUERY: eq filter, no index (scan) | 514.1K/s | 1.95 µs |
+| QUERY: eq filter, eq index | **1.45M/s** | 0.69 µs |
+| QUERY: ORDER BY + ordered index, LIMIT 20 | 454.7K/s | 2.20 µs |
+| QUERY: SEARCH, inverted index | 492.3K/s | 2.03 µs |
+| PUT durable (AOF + fsync) | 7.3K/s | 137.59 µs |
 
-## Install
+Time travel is not a tax: an `AS OF` read runs at **~70% of the speed of a current-state read**.
 
-```bash
-pip install nedb-engine      # Python ≥ 3.8 — pure-Python + optional Rust native wheel
-npm install nedb-engine       # Node ≥ 16   — napi-rs prebuilt binaries
-```
+**The daemon over HTTP (v2 DAG server v2.2.31, Intel iMac — 10k writes / 100k reads / 30k objects, AES-256-GCM on).
+Reproduce: `NEDBD_DAG=1 nedbd --data /tmp/perf &` then `python3 tests/test_dag_perf.py --n 10000 --reads 100000`**
 
-### Prebuilt platforms
-
-Both registries ship prebuilt binaries for:
-
-| Platform | libc | Python wheel | Node addon |
+| Operation | Throughput | p50 | p99 |
 |---|---|---|---|
-| Linux x86_64 | glibc | ✅ manylinux | ✅ |
-| Linux x86_64 | musl (Alpine) | ✅ musllinux | ✅ |
-| Linux aarch64 (Graviton, Ampere, Apple-Silicon containers) | glibc | ✅ manylinux | ✅ |
-| Linux aarch64 | musl (Alpine) | ✅ musllinux | ✅ |
-| macOS arm64 + x86_64 | — | ✅ | ✅ |
-| Windows x86_64 | MSVC | ✅ | ✅ |
+| Sequential writes | **418 ops/s** | 2.3 ms | 3.3 ms |
+| Point-lookup reads | **478 ops/s** | 2.0 ms | 3.0 ms |
+| ORDER BY queries | **489 ops/s** | 1.8 ms | 4.3 ms |
+| Batch writes (500 ops/req) | **1,104 ops/s** | 0.9 ms | 1.2 ms |
+| Tamper-verify (30k objects) | ~21,000 BLAKE2b/sec | — | 1.38 s total |
 
-On Python, any platform without a prebuilt wheel still installs: pip falls back
-to the universal `py3-none-any` wheel and you get the pure-Python v1 AOF engine
-(correct, slower, no embedded DAG). On Node there is no such fallback — an
-unlisted platform has no addon.
+p99 latencies hold because of `TCP_NODELAY` on the axum listener — without it macOS loopback adds the Nagle algorithm's 40–200 ms delay on small writes.
 
----
+**SQL joins inside the evaluator (nested loop vs hash, fixed-seed workload, engine 4.0.0, Linux x86-64) —
+`docs/BENCH-sqlselect.md`. Reproduce: `cargo run --release --example sqlbench`**
 
-## Python — 5-minute tour
+| workload | nested (ms) | hash (ms) | speedup |
+|---|---:|---:|---:|
+| equality join (1,000 × 500 rows) | 366.62 | 4.05 | **90.6×** |
+| left join | 373.27 | 4.03 | **92.5×** |
+| join + sort | 403.51 | 6.35 | **63.6×** |
+| join + broad pred | 336.34 | 4.68 | **71.9×** |
+| non-equality join | 344.69 | 346.33 | — *(same path, no hash key)* |
 
-```python
-from nedb import NEDB
+**Indexed range scans (20,000 rows, two identical stores, one indexed) — `scripts/bench_index_range.py`**
 
-db = NEDB("./mydata")          # durable: every op is AOF-logged, fsync'd, and hash-chained
-# db = NEDB()                  # or in-memory
+| Query | Scan | Indexed | Speedup |
+| --- | --- | --- | --- |
+| `WHERE fee = 10000` | 137 ms | 0.01 ms | **17,000×** |
+| `WHERE fee IN (a, b, c)` | 185 ms | 0.02 ms | 9,700× |
+| `WHERE fee BETWEEN …` (1% of rows) | 186 ms | 1.1 ms | 170× |
+| `WHERE fee BETWEEN …` (10% of rows) | 188 ms | 13 ms | 14× |
+| unindexed field (control) | 188 ms | 187 ms | 1.0× |
 
-db.create_index("users", "status", "eq")
-db.create_index("users", "bio",    "search")
+**v1 Python server (baseline — single-threaded AOF):**
 
-db.put("users", "alice", {"name": "Alice", "age": 31, "status": "active", "bio": "rust hacker"})
-db.put("users", "bob",   {"name": "Bob",   "age": 24, "status": "active", "bio": "python dev"})
+| Operation | Throughput | p99 latency |
+|---|---|---|
+| Sequential PUT | ~23/s | 44 ms |
+| Concurrent PUT (16 workers) | ~92/s | 48 ms |
+| Batch PUT (500 ops/request) | ~520 ops/s | 1.9 ms/op |
+| Point-lookup read (NQL) | ~23/s | 44 ms |
+| Rust napi PUT (FFI) | ~70K/s | — |
+| Rust napi GET (FFI) | ~330K/s | — |
 
-# NQL: WHERE + ORDER BY + LIMIT + SEARCH + TRAVERSE + GROUP BY
-db.query('FROM users WHERE status = "active" ORDER BY age ASC')
-db.query('FROM users SEARCH "rust"')
-db.query('FROM users GROUP BY status COUNT')
-
-# Full boolean predicates — IN, BETWEEN, LIKE, IS NULL, OR, NOT, parentheses
-db.query('FROM users WHERE status IN ("active", "trialing")')
-db.query('FROM users WHERE age BETWEEN 25 AND 40')
-db.query('FROM users WHERE bio LIKE "%rust%" AND NOT (status = "retired")')
-db.query('FROM users WHERE (age < 25 OR age > 60) AND bio IS NOT NULL')
-
-# Time-travel — AS OF any past sequence
-snap = db.seq
-db.put("users", "alice", {"name": "Alice", "age": 32, "status": "retired"})
-db.get("users", "alice", as_of=snap)          # → age 31, status active
-
-# Bi-temporal — VALID AS OF any past date
-db.put("policy", "rate_2024", {"pct": 5.0}, valid_from="2024-01-01", valid_to="2024-12-31")
-db.put("policy", "rate_2025", {"pct": 6.0}, valid_from="2025-01-01")
-db.query('FROM policy VALID AS OF "2024-06-15"')   # → rate 5.0
-
-# Causal Write Provenance — why did this write happen?
-db.put("inputs", "msg_1", {"text": "user prefers dark mode"})
-seq_msg = db.seq
-db.put("beliefs", "dark_mode", {"value": True},
-       caused_by=[seq_msg], evidence="user_message", confidence=0.95)
-db.query('FROM beliefs WHERE _id = "dark_mode" TRACE caused_by')   # → msg_1
-db.query('FROM inputs WHERE _id = "msg_1" TRACE caused_by REVERSE') # → dark_mode
-
-# Relations + graph traversal
-db.link("users:alice", "follows", "users:bob")
-db.query('FROM users WHERE _id = "alice" TRAVERSE follows')
-
-# Hash-chain integrity
-assert db.verify()             # cryptographic proof — no tampering
-
-# SQL, Redis, MongoDB compatibility adapters
-from nedb import sql_exec, RedisCompat, MongoClient
-sql_exec(db, "SELECT * FROM users WHERE status = 'active' ORDER BY age DESC")
-r = RedisCompat(db); r.execute("HSET", "user:1", "name", "Alice")
-MongoClient(db)["users"].find({"status": "active"}).sort("age", -1).to_list()
-```
-
----
-
-## Official Python client — talk to nedbd over HTTP
-
-Running the daemon? `nedb.client.NedbClient` is the official client for its
-HTTP API — extracted from the battle-tested clients that ran a production
-Redis→NEDB mainnet migration, speaking the full route surface: queries,
-atomic CAS transactions, TTL, indexes, relations, Merkle proofs, and the
-Mongo-compat endpoint. Env-var defaults (`NEDBD_URL`, `NEDBD_TOKEN`,
-`NEDB_DB`) mirror the daemon's own.
-
-```python
-from nedb import NedbClient, PreconditionFailed, op_put
-
-c = NedbClient("http://127.0.0.1:7070", db="app", token="s3cret")
-c.ensure_database()
-
-c.put("users", "u1", {"id": "u1", "email": "a@b.c"}, idem="signup-u1")
-c.query('FROM users WHERE email = "a@b.c"')      # full NQL rides through
-c.query("FROM users AS OF 41")                    # time-travel included
-
-# Atomic all-or-nothing transaction with engine-checked preconditions —
-# the primitive that replaces Redis Lua scripts (if_seq: N = CAS, -1 = create-once)
-doc = c.get_doc("users", "u1")                    # docs carry _seq
-c.tx([op_put("users", "u1", {**doc, "plan": "pro"}, if_seq=doc["_seq"])])
-
-# Contested writes: retry ONLY on PreconditionFailed, capped backoff
-def bump():
-    d = c.get_doc("counters", "hits") or {"n": 0}
-    return c.tx([op_put("counters", "hits", {"n": d.get("n", 0) + 1},
-                        if_seq=d.get("_seq", -1))])
-c.cas_retry(bump)
-
-# Integrity, verifiable WITHOUT trusting the server
-proof = c.proof(c.log(limit=1)[0]["hash"])
-from nedb import verify_proof; verify_proof(proof)  # -> True, locally
-```
-
-A CAS miss raises the **same `PreconditionFailed`** (with the same
-`.failures` shape) the embedded engine raises — code written against
-`NEDB.tx` ports to the HTTP client without changing its except-clauses.
-Typed errors throughout: `NedbAuthError`, `NedbNotFound`, `NedbBadRequest`,
-`NedbConflict`, `CasExhausted`.
-
----
-
-## Redis layer-2 — wrap_redis()
-
-Already running on Redis? Wrap your connection in one line and gain NEDB features *alongside* your existing Redis app — no migration required.
-
-```python
-import redis, json
-from nedb import wrap_redis
-
-r = wrap_redis(redis.Redis("localhost", 6379), db_name="rideshare")
-
-# Step 1 — register: map Redis key globs to NEDB collections (chainable)
-(r.nedb
- .register("driver:*", collection="driver", value_parser=json.loads)
- .register("trip:*",   collection="trip",   value_type="hash")
-)
-
-# Step 2 — backfill: import all existing Redis data into NEDB in one pass
-imported = r.nedb.backfill()           # → int (keys imported)
-
-# Step 3 — shadow: all future r.set/hset/... auto-chain into NEDB
-r.nedb.shadow_writes = True
-
-# ─── Alice's app keeps running — zero changes ───────────────────────────
-r.set("driver:d1", json.dumps({"name": "Bob", "status": "active"}))   # ← shadowed
-r.hset("trip:t1", mapping={"status": "en_route", "driver_id": "d1"})  # ← shadowed
-
-# ─── New features available on the same connection ──────────────────────
-r.nedb.query('FROM driver WHERE status = "active" ORDER BY lat ASC')
-r.nedb.verify()       # → True  (every write chain-verified)
-r.nedb.head()         # → 64-char BLAKE2b commitment hash
-```
-
-**Isolation guarantee:** NEDB never writes to Alice's namespace. It owns only:
-
-| Key | Type | Purpose |
-|-----|------|---------|
-| `nedb:{db_name}:oplog` | Redis Stream | append-only op log |
-| `nedb:{db_name}:snapshot` | Redis Hash | checkpoint |
-| `nedb:{db_name}:meta` | Redis Hash | index config |
-
-See [`examples/fakeredis_demo.py`](examples/fakeredis_demo.py) for a full local demo (no Redis server needed).
-
----
-
-## Node.js
-
-```javascript
-import { NedbCore } from "nedb-engine";
-
-const db = new NedbCore();               // in-memory
-// const db = NedbCore.open("./data");   // durable
-
-db.createIndex("users", "status", "eq");
-db.put("users", "alice", JSON.stringify({ name: "Alice", age: 31, status: "active" }));
-
-// Time-travel
-const snap = db.seq();                   // BigInt
-db.put("users", "alice", JSON.stringify({ name: "Alice", age: 32, status: "retired" }));
-JSON.parse(db.getAsOf("users", "alice", snap)).age;  // → 31
-
-// Full NQL
-const rows = db.query('FROM users WHERE status = "active" ORDER BY age ASC');
-rows.map(r => JSON.parse(r));
-
-// Tamper evidence
-db.verify();   // → true
-db.head();     // → 64-char BLAKE2b commitment hash
-db.seq();      // → BigInt
-```
+And the number from the v3 section that justifies the whole storage line: a real itcd chainstate flush of 2,549 coins went from **minutes** on the v2 loose store to **1.71 s** on `--dag-v3` — measured on the real chain, not a fixture.
 
 ---
 
@@ -1182,14 +1085,13 @@ db.query("FROM blocks WHERE height BETWEEN 600000 AND 600100")
 ```
 
 Measured on 20,000 rows with `scripts/bench_index_range.py` — two identical
-databases, one indexed, one not:
+databases, one indexed, one not (the full table lives in
+[**Performance**](#performance--every-number-dated-and-reproducible)):
 
 | Query | Scan | Indexed | Speedup |
 | --- | --- | --- | --- |
 | `WHERE fee = 10000` | 137 ms | 0.01 ms | 17,000× |
-| `WHERE fee IN (a, b, c)` | 185 ms | 0.02 ms | 9,700× |
 | `WHERE fee BETWEEN …` (1% of rows) | 186 ms | 1.1 ms | 170× |
-| `WHERE fee BETWEEN …` (10% of rows) | 188 ms | 13 ms | 14× |
 | unindexed field (control) | 188 ms | 187 ms | 1.0× |
 
 The planner asks the index how many rows each candidate range covers and takes
@@ -1510,36 +1412,265 @@ Two habits that avoid most misses:
 
 ---
 
-## Performance
+## Architecture
 
-**v2 DAG Rust server (v2.2.31, Intel iMac — 10k writes / 100k reads / 30k objects, AES-256-GCM on):**
+```
+            ┌──────────────────────────────────────────────────────────┐
+  put/del → │  OpLog  (BLAKE2b hash chain · per-client nonce ·          │ ← single source of truth
+  link      │          idempotency keys · causal provenance fields)     │
+            └───────────────┬──────────────────────────────────────────┘
+            deterministic fold │ (state = pure function of the log)
+     ┌──────────────┬──────────┴──────┬───────────────┬────────────────┐
+     ▼              ▼                 ▼               ▼                ▼
+MVCC store     Relations          Indexes         CauseMap          BlobStore
+(time-travel)  (graph+AS OF)      eq/ord/search   (reverse index)   (Cascade CDC)
 
-| Operation | Throughput | p50 | p99 |
-|---|---|---|---|
-| Sequential writes | **418 ops/s** | 2.3 ms | 3.3 ms |
-| Point-lookup reads | **478 ops/s** | 2.0 ms | 3.0 ms |
-| ORDER BY queries | **489 ops/s** | 1.8 ms | 4.3 ms |
-| Batch writes (500 ops/req) | **1,104 ops/s** | 0.9 ms | 1.2 ms |
-| Tamper-verify (30k objects) | ~21,000 BLAKE2b/sec | — | 1.38 s total |
+                     ┌─────────────────────────────────┐
+  Thread-safe →      │  Sequencer (group-commit)         │ ← single writer, parallel readers
+                     │  — one committer thread/db        │
+                     │  — batch fsync                    │
+                     └─────────────────────────────────┘
 
-p99 latencies hold because of `TCP_NODELAY` on the axum listener — without it macOS loopback adds the Nagle algorithm's 40–200 ms delay on small writes.
+Compatibility adapters:  SQL  ·  Redis  ·  MongoDB
+Wire protocols:          HTTP/JSON  ·  RESP2  ·  PostgreSQL wire
+Encryption:              AES-256-GCM at-rest (TMK/DEK double-envelope)
+```
 
-**v1 Python server (baseline — single-threaded AOF):**
+The provenance machinery is load-bearing infrastructure, not metadata stapled on: `CauseMap` is a
+reverse index over causal edges (that is why `TRACE … REVERSE` is as fast as forward), and the
+`Relations` layer backs both `TRAVERSE` and the `AS OF` joins.
 
-| Operation | Throughput | p99 latency |
-|---|---|---|
-| Sequential PUT | ~23/s | 44 ms |
-| Concurrent PUT (16 workers) | ~92/s | 48 ms |
-| Batch PUT (500 ops/request) | ~520 ops/s | 1.9 ms/op |
-| Point-lookup read (NQL) | ~23/s | 44 ms |
-| Rust napi PUT (FFI) | ~70K/s | — |
-| Rust napi GET (FFI) | ~330K/s | — |
+---
 
-Reproduce with the included benchmark:
+## Install
 
 ```bash
-NEDBD_DAG=1 nedbd --data /tmp/perf &
-python3 tests/test_dag_perf.py --n 10000 --reads 100000
+pip install nedb-engine      # Python ≥ 3.8 — pure-Python + optional Rust native wheel
+npm install nedb-engine       # Node ≥ 16   — napi-rs prebuilt binaries
+```
+
+### Prebuilt platforms
+
+Both registries ship prebuilt binaries for:
+
+| Platform | libc | Python wheel | Node addon |
+|---|---|---|---|
+| Linux x86_64 | glibc | ✅ manylinux | ✅ |
+| Linux x86_64 | musl (Alpine) | ✅ musllinux | ✅ |
+| Linux aarch64 (Graviton, Ampere, Apple-Silicon containers) | glibc | ✅ manylinux | ✅ |
+| Linux aarch64 | musl (Alpine) | ✅ musllinux | ✅ |
+| macOS arm64 + x86_64 | — | ✅ | ✅ |
+| Windows x86_64 | MSVC | ✅ | ✅ |
+
+On Python, any platform without a prebuilt wheel still installs: pip falls back
+to the universal `py3-none-any` wheel and you get the pure-Python v1 AOF engine
+(correct, slower, no embedded DAG). On Node there is no such fallback — an
+unlisted platform has no addon.
+
+---
+
+## Python — 5-minute tour
+
+Every example in this tour was executed against the released **8.0.0** package.
+
+```python
+from nedb import NEDB
+
+db = NEDB("./mydata")          # durable: every op is AOF-logged, fsync'd, and hash-chained
+# db = NEDB()                  # or in-memory
+
+db.create_index("users", "status", "eq")
+db.create_index("users", "bio",    "search")
+
+db.put("users", "alice", {"name": "Alice", "age": 31, "status": "active", "bio": "rust hacker"})
+db.put("users", "bob",   {"name": "Bob",   "age": 24, "status": "active", "bio": "python dev"})
+
+# NQL: WHERE + ORDER BY + LIMIT + SEARCH + TRAVERSE + GROUP BY
+db.query('FROM users WHERE status = "active" ORDER BY age ASC')
+db.query('FROM users SEARCH "rust"')
+db.query('FROM users GROUP BY status COUNT')
+
+# Full boolean predicates — IN, BETWEEN, LIKE, IS NULL, OR, NOT, parentheses
+db.query('FROM users WHERE status IN ("active", "trialing")')
+db.query('FROM users WHERE age BETWEEN 25 AND 40')
+db.query('FROM users WHERE bio LIKE "%rust%" AND NOT (status = "retired")')
+db.query('FROM users WHERE (age < 25 OR age > 60) AND bio IS NOT NULL')
+
+# Time-travel — AS OF any past sequence
+snap = db.seq
+db.put("users", "alice", {"name": "Alice", "age": 32, "status": "retired"})
+db.get("users", "alice", as_of=snap)          # → age 31, status active
+
+# Bi-temporal — VALID AS OF any past date
+db.put("policy", "rate_2024", {"pct": 5.0}, valid_from="2024-01-01", valid_to="2024-12-31")
+db.put("policy", "rate_2025", {"pct": 6.0}, valid_from="2025-01-01")
+db.query('FROM policy VALID AS OF "2024-06-15"')   # → rate 5.0
+
+# Causal Write Provenance — why did this write happen?
+db.put("inputs", "msg_1", {"text": "user prefers dark mode"})
+seq_msg = db.seq
+db.put("beliefs", "dark_mode", {"value": True},
+       caused_by=[seq_msg], evidence="user_message", confidence=0.95)
+db.query('FROM beliefs WHERE _id = "dark_mode" TRACE caused_by')   # → msg_1
+db.query('FROM inputs WHERE _id = "msg_1" TRACE caused_by REVERSE') # → dark_mode
+
+# Relations + graph traversal
+db.link("users:alice", "follows", "users:bob")
+db.query('FROM users WHERE _id = "alice" TRAVERSE follows')
+
+# Hash-chain integrity — verify() is a call, head is the commitment
+assert db.verify()             # cryptographic proof — no tampering
+db.head                        # → 64-char BLAKE2b Merkle head (a property, not a call)
+
+# SQL, Redis, MongoDB compatibility adapters
+from nedb import sql_exec, RedisCompat, MongoClient
+sql_exec(db, "SELECT * FROM users WHERE status = 'active' ORDER BY age DESC")
+r = RedisCompat(db); r.execute("HSET", "user:1", "name", "Alice")
+MongoClient(db)["users"].find({"status": "active"}).sort("age", -1).to_list()
+```
+
+---
+
+## Official Python client — talk to nedbd over HTTP
+
+Running the daemon? `nedb.client.NedbClient` is the official client for its
+HTTP API — extracted from the battle-tested clients that ran a production
+Redis→NEDB mainnet migration, speaking the full route surface: queries,
+atomic CAS transactions, TTL, indexes, relations, Merkle proofs, and the
+Mongo-compat endpoint. Env-var defaults (`NEDBD_URL`, `NEDBD_TOKEN`,
+`NEDB_DB`) mirror the daemon's own.
+
+```python
+from nedb import NedbClient, PreconditionFailed, op_put
+
+c = NedbClient("http://127.0.0.1:7070", db="app", token="s3cret")
+c.ensure_database()
+
+c.put("users", "u1", {"id": "u1", "email": "a@b.c"}, idem="signup-u1")
+c.query('FROM users WHERE email = "a@b.c"')      # full NQL rides through
+c.query("FROM users AS OF 41")                    # time-travel included
+
+# Atomic all-or-nothing transaction with engine-checked preconditions —
+# the primitive that replaces Redis Lua scripts (if_seq: N = CAS, -1 = create-once)
+doc = c.get_doc("users", "u1")                    # docs carry _seq
+c.tx([op_put("users", "u1", {**doc, "plan": "pro"}, if_seq=doc["_seq"])])
+
+# Contested writes: retry ONLY on PreconditionFailed, capped backoff
+def bump():
+    d = c.get_doc("counters", "hits") or {"n": 0}
+    return c.tx([op_put("counters", "hits", {"n": d.get("n", 0) + 1},
+                        if_seq=d.get("_seq", -1))])
+c.cas_retry(bump)
+
+# Integrity, verifiable WITHOUT trusting the server
+proof = c.proof(c.log(limit=1)[0]["hash"])
+from nedb import verify_proof; verify_proof(proof)  # -> True, locally
+```
+
+A CAS miss raises the **same `PreconditionFailed`** (with the same
+`.failures` shape) the embedded engine raises — code written against
+`NEDB.tx` ports to the HTTP client without changing its except-clauses.
+Typed errors throughout: `NedbAuthError`, `NedbNotFound`, `NedbBadRequest`,
+`NedbConflict`, `CasExhausted`.
+
+---
+
+## Redis layer-2 — wrap_redis()
+
+Already running on Redis? Wrap your connection in one line and gain NEDB features *alongside* your existing Redis app — no migration required.
+
+```python
+import redis, json
+from nedb import wrap_redis
+
+r = wrap_redis(redis.Redis("localhost", 6379), db_name="rideshare")
+
+# Step 1 — register: map Redis key globs to NEDB collections (chainable)
+(r.nedb
+ .register("driver:*", collection="driver", value_parser=json.loads)
+ .register("trip:*",   collection="trip",   value_type="hash")
+)
+
+# Step 2 — backfill: import all existing Redis data into NEDB in one pass
+imported = r.nedb.backfill()           # → int (keys imported)
+
+# Step 3 — shadow: all future r.set/hset/... auto-chain into NEDB
+r.nedb.shadow_writes = True
+
+# ─── Alice's app keeps running — zero changes ───────────────────────────
+r.set("driver:d1", json.dumps({"name": "Bob", "status": "active"}))   # ← shadowed
+r.hset("trip:t1", mapping={"status": "en_route", "driver_id": "d1"})  # ← shadowed
+
+# ─── New features available on the same connection ──────────────────────
+r.nedb.query('FROM driver WHERE status = "active" ORDER BY lat ASC')
+r.nedb.verify()       # → True  (every write chain-verified)
+r.nedb.head()         # → 64-char BLAKE2b commitment hash
+```
+
+**Isolation guarantee:** NEDB never writes to Alice's namespace. It owns only:
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `nedb:{db_name}:oplog` | Redis Stream | append-only op log |
+| `nedb:{db_name}:snapshot` | Redis Hash | checkpoint |
+| `nedb:{db_name}:meta` | Redis Hash | index config |
+
+See [`examples/fakeredis_demo.py`](examples/fakeredis_demo.py) for a full local demo (no Redis server needed).
+
+---
+
+## Node.js
+
+```javascript
+import { NedbCore } from "nedb-engine";
+
+const db = new NedbCore();               // in-memory
+// const db = NedbCore.open("./data");   // durable
+
+db.createIndex("users", "status", "eq");
+db.put("users", "alice", JSON.stringify({ name: "Alice", age: 31, status: "active" }));
+
+// Time-travel
+const snap = db.seq();                   // BigInt
+db.put("users", "alice", JSON.stringify({ name: "Alice", age: 32, status: "retired" }));
+JSON.parse(db.getAsOf("users", "alice", snap)).age;  # → 31
+
+// Full NQL
+const rows = db.query('FROM users WHERE status = "active" ORDER BY age ASC');
+rows.map(r => JSON.parse(r));
+
+// Tamper evidence
+db.verify();   // → true
+db.head();     // → 64-char BLAKE2b commitment hash
+db.seq();      // → BigInt
+```
+
+---
+
+## nedb-client — lightweight HTTP client
+
+Connect to any running nedbd instance from Python or TypeScript without embedding the engine:
+
+```bash
+pip install nedb-engine-client          # async Python
+npm install nedb-engine-client   # TypeScript / Node.js 18+
+```
+
+```python
+from nedb_client import NedbClient
+
+async with NedbClient("http://127.0.0.1:7070", db="mydb") as db:
+    await db.put("blocks", "618000", {"height": 618000})
+    rows = await db.query("FROM blocks ORDER BY height DESC LIMIT 10")
+    head = await db.head()    # BLAKE2b Merkle root — changes on every write
+    ok   = await db.verify()  # tamper-evidence check across all objects
+```
+
+```typescript
+import { NedbClient } from "nedb-engine-client";
+const db = new NedbClient({ url: "http://127.0.0.1:7070", db: "mydb" });
+await db.put("blocks", "618000", { height: 618000 });
+const rows = await db.query("FROM blocks LIMIT 10");
 ```
 
 ---
@@ -1590,107 +1721,52 @@ Reach for v3 on high-write, large-object-count workloads — blockchain chainsta
 
 ---
 
-## Architecture
-
-```
-            ┌──────────────────────────────────────────────────────────┐
-  put/del → │  OpLog  (BLAKE2b hash chain · per-client nonce ·          │ ← single source of truth
-  link      │          idempotency keys · causal provenance fields)     │
-            └───────────────┬──────────────────────────────────────────┘
-            deterministic fold │ (state = pure function of the log)
-     ┌──────────────┬──────────┴──────┬───────────────┬────────────────┐
-     ▼              ▼                 ▼               ▼                ▼
-MVCC store     Relations          Indexes         CauseMap          BlobStore
-(time-travel)  (graph+AS OF)      eq/ord/search   (reverse index)   (Cascade CDC)
-
-                     ┌─────────────────────────────────┐
-  Thread-safe →      │  Sequencer (group-commit)         │ ← single writer, parallel readers
-                     │  — one committer thread/db        │
-                     │  — batch fsync                    │
-                     └─────────────────────────────────┘
-
-Compatibility adapters:  SQL  ·  Redis  ·  MongoDB
-Wire protocols:          HTTP/JSON  ·  RESP2
-Encryption:              AES-256-GCM at-rest (TMK/DEK double-envelope)
-```
-
----
-
-## nedb-client — lightweight HTTP client
-
-Connect to any running nedbd instance from Python or TypeScript without embedding the engine:
-
-```bash
-pip install nedb-engine-client          # async Python
-npm install nedb-engine-client   # TypeScript / Node.js 18+
-```
-
-```python
-from nedb_client import NedbClient
-
-async with NedbClient("http://127.0.0.1:7070", db="mydb") as db:
-    await db.put("blocks", "618000", {"height": 618000})
-    rows = await db.query("FROM blocks ORDER BY height DESC LIMIT 10")
-    head = await db.head()    # BLAKE2b Merkle root — changes on every write
-    ok   = await db.verify()  # tamper-evidence check across all objects
-```
-
-```typescript
-import { NedbClient } from "nedb-engine-client";
-const db = new NedbClient({ url: "http://127.0.0.1:7070", db: "mydb" });
-await db.put("blocks", "618000", { height: 618000 });
-const rows = await db.query("FROM blocks LIMIT 10");
-```
-
----
-
 ## Repo layout
 
 ```
 python/nedb/        reference engine (pure Python — always-works baseline)
 rust/
+  nedb-v2/          v2 DAG engine (tokio + axum + BLAKE2b DAG) — the core everything binds
+  nesql-cli/        the nesql CLI (query / root / inspect / diff / tag / branch / merge)
   nedb-core/        v1 production Rust engine (shared by both runtimes)
   nedb-py/          maturin PyO3 binding → PyPI native wheels
   nedb-node/        napi-rs binding → npm native addons
-  nedb-v2/          v2 DAG engine (tokio + axum + BLAKE2b DAG)
-client/
-  python/           nedb-client — async Python HTTP client (pip install nedb-engine-client)
-  node/             nedb-client — TypeScript HTTP client  (npm install nedb-client)
+  nedb-wrap/        the wrap_* surface at native speed
+vendor/postgresql/  PostgreSQL 17.4 grammar, vendored (gram.y, kwlist.h, system_views.sql, information_schema.sql)
+distributions/      crypto-database + aof-db submodules (the tri-distribution release)
+bench/              benchmarks.py + RESULTS.md — the dated embedded-core numbers
 tests/              engine + concurrent + causal + bitemporal + deploy + perf benchmarks
-examples/           resp2_python.py  resp2_demo.sh
-docs/               index.html  reference.html  SPEC.md
+vectors/            state_root_v1.json — cross-engine state-root test vectors
+docs/               SPEC.md · CLI.md · DURABILITY.md · REPLICATION.md · BENCH-sqlselect.md
+client/             nedb-engine-client — async Python + TypeScript HTTP clients
+examples/           agent-loop · mini-chain · resp2 demos · fakeredis demo
+scripts/            release.py · test-cast.sh · bench_index_range.py · seed-shop.sh
 ```
 
 ---
 
-## Roadmap
+## Ship log — the highlights, in order
 
-- [x] Hash-chained append-only log — tamper evidence, replay protection, idempotency
-- [x] MVCC time-travel — `AS OF seq`
-- [x] Bi-temporal — `VALID AS OF "date"` (transaction time + valid time)
-- [x] Causal Write Provenance — `caused_by`, `evidence`, `confidence`, `TRACE`
-- [x] Durable AOF persistence + snapshot checkpoints
-- [x] Concurrent group-commit sequencer (nedbd, 15K writes/s under load)
-- [x] AES-256-GCM at-rest encryption (TMK/DEK double-envelope)
-- [x] SQL / Redis / MongoDB compatibility adapters
-- [x] RESP2 wire protocol (redis-cli / redis-benchmark compatible)
-- [x] Rust native core — napi-rs (npm) + maturin PyO3 (PyPI)
-- [x] Self-healing AOF — auto-truncates corrupt tail on startup, never hangs
-- [x] **v2 DAG engine** — content-addressed Merkle DAG, atomic writes, instant cold start
-- [x] **`nedbd --dag`** — one flag switches to v2 Rust engine; v1 untouched
-- [x] **BLAKE2b Merkle head** — tamper-evident root on every response
-- [x] **Tombstone deletes** — history preserved in DAG, live id removed from index
-- [x] **Auto-migration** — v1 AOF → v2 DAG on first `--dag` startup
-- [x] **nedb-client** — async Python + TypeScript HTTP client (`pip/npm install nedb-client`)
-- [x] **Intel Mac support** — native wheels for `aarch64` + `x86_64` Apple Darwin
-- [x] **v3 segment/pack object store** — opt-in `--dag-v3`: append-only packs, one fsync per batch, compaction + `.idx` sidecars, non-destructive dual-read (minutes → <2s chainstate flush on itcd)
-- [ ] In-memory DAG mode — `Db::in_memory()` for zero-disk ephemeral sessions
-- [ ] PyO3 + napi-rs bindings updated to v2 DAG API
-- [ ] NEDB Studio DAG mode toggle
-- [ ] Merkle inclusion proofs — prove a document existed at a specific time to a third party
-- [ ] Git-style branching — fork database state, experiment, merge or discard
-- [ ] Agent Memory SDK — `Memory.remember()` / `Memory.recall()` / `Memory.trace()`
-- [ ] Live query subscriptions (SSE) — push diffs when query results change
+NEDB's release history outgrew any changelog, and the README was where versions went to pile up.
+This is the map; the commits are the story.
+
+- **8.x — neSQL ships.** PostgreSQL's real grammar vendored and extended; one evaluator answers every
+  `SELECT` with nothing to enable; NQL's verbs are SQL clauses; the `nesql` CLI ships in the wheel.
+- **7.x — the neSQL endpoint surface.** The HTTP `/query` route speaks both dialects through one
+  router; the CLI's publish path lands.
+- **6.x — hardening, discipline, the road to one name.**
+- **5.x — neSQL named, registered, vendored.** The grammar lands at `vendor/postgresql/`;
+  `nesql` reserved on all three registries.
+- **4.0 — BUSL-1.1** (free under $1M revenue; Apache 2.0 on the 2030-09-11 Change Date).
+- **3.3 — the query language grows up.** Full boolean predicates in both engines; nine silent
+  defects fixed; cross-engine parity gated.
+- **3.2 — the wrap family.** Redis/SQLite/Postgres/MySQL/Mongo adapters; durability fixes; PR CI.
+- **3.0–3.3.1 — the MIT era** (irrevocably MIT).
+- **2.8 — Cast.** A 3.33M-parameter model trained inside the engine's own parser; drift detection.
+- **2.5 — flush-on-exit, nedb-cli, inspector, replication contract.**
+- **2.4 — v3 segment store** (`--dag-v3`): itcd chainstate flush minutes → ~1.3 s.
+- **2.2 — v2 DAG engine.** Content-addressed Merkle DAG, O(1) warm start, SSE `/events`.
+- **1.x — v1 AOF engine.** Hash-chained log, MVCC time-travel, bi-temporal, `TRACE caused_by`.
 
 ---
 
@@ -1702,14 +1778,16 @@ Prompt-to-database scaffolding GUI with schema graph, NQL console, time-travel s
 
 ---
 
-## Repos
+## Repos & packages
 
-| Repo | Description |
+| Where | What |
 |---|---|
-| [aiassistsecure/nedb](https://github.com/aiassistsecure/nedb) | Source — engine, Rust core, CI |
+| [Eth-Interchained/nedb](https://github.com/Eth-Interchained/nedb) | **canonical source** — engine, Rust core, CI, this README |
+| [aiassistsecure/nedb](https://github.com/aiassistsecure/nedb) | mirror + [GitHub Pages site](https://nedb.aiassist.net) |
+| [Eth-Interchained/neSQL](https://github.com/Eth-Interchained/neSQL) | the language — both halves of the grammar, CLI source |
 | [aiassistsecure/nedb-studio](https://github.com/aiassistsecure/nedb-studio) | Studio UI (GPLv3) |
 
-**Packages:** [PyPI nedb-engine](https://pypi.org/project/nedb-engine/) · [npm nedb-engine](https://www.npmjs.com/package/nedb-engine)
+**Packages:** [PyPI nedb-engine](https://pypi.org/project/nedb-engine/) · [npm nedb-engine](https://www.npmjs.com/package/nedb-engine) · [crates.io nedb-engine](https://crates.io/crates/nedb-engine) — plus the aligned `crypto-database` and `aof-db` distributions on all three registries.
 
 ---
 
@@ -1737,7 +1815,11 @@ Requires `GITHUB_TOKEN` (`repo` + `workflow` scope) in the environment. It never
 
 ## License
 
-**MIT License** — free for any use, including commercial and production. See [`LICENSE`](LICENSE).
+**Business Source License 1.1** — free for any organisation under USD $1M annual revenue, including
+commercial and production use. Converts to **Apache 2.0** on **2030-09-11**, automatically and
+permanently. Versions 3.0.0–3.3.1 remain MIT, irrevocably. See [`LICENSE`](LICENSE) and
+[`COPYING-APACHE-2.0.txt`](COPYING-APACHE-2.0.txt).
+
 © 2026 INTERCHAINED LLC — [interchained.org](https://interchained.org)
 
 ---
