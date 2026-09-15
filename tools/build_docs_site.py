@@ -26,11 +26,11 @@ PAGES = [
     ("provenance", "Provenance & Time", "Core concepts",
      "The four axes: what, when, true-when, why — and the three commitments."),
 
-    ("nql", "The Query Language (NQL)", "Core concepts",
-     "Full grammar reference: clauses, predicates, three-valued logic, aggregates."),
+    ("nesql", "The Query Language — neSQL", "Core concepts",
+     "PostgreSQL SQL + the extended FROM-form: one grammar, one evaluator, one router."),
 
-    ("nesql", "neSQL", "Core concepts",
-     "PostgreSQL's grammar + NEDB's clauses, one evaluator, one router."),
+    ("nql", "The FROM-form in Depth", "Core concepts",
+     "Full clause reference: predicates, three-valued logic, aggregates, indexes."),
 
     ("protocols", "Wire Protocols", "Running it",
      "HTTP/JSON, PostgreSQL wire (simple + extended), RESP2."),
@@ -72,6 +72,7 @@ and it can prove all four, offline, to a third party.</p>
 <li><b>Causality is data.</b> A write can cite the writes that caused it (<code>caused_by</code>), and <code>TRACE</code> walks that graph in both directions as a query.</li>
 <li><b>Provenance costs speed, not correctness.</b> Time-travel reads run at ~70% of current-state read speed.</li>
 <li><b>One core, three languages, one version.</b> Python, Node and Rust all bind the same Rust engine; PyPI, npm and crates.io publish in lockstep from a single git tag.</li>
+<li><b>You query it in SQL.</b> neSQL inherits PostgreSQL's grammar whole and extends it with the clauses a permanent store can answer — you don't learn a new query language, you learn the additions.</li>
 </ul>
 
 <h2>Five-minute start</h2>
@@ -82,13 +83,14 @@ and it can prove all four, offline, to a third party.</p>
 db = NEDB("./mydata")                      # durable, hash-chained
 db.put("users", "alice", {"name": "Alice", "age": 31})
 
-db.query('FROM users WHERE age > 30')       # NQL — the native language
+db.query('SELECT * FROM users WHERE age > 30')   # PostgreSQL SQL — the daemon speaks it
+db.query('FROM users WHERE age > 30')            # the extended FROM-form (embedded cores)
 db.head                                     # the 64-char BLAKE2b Merkle head
 db.verify()                                 # True — the chain is intact</code></pre>
 
-<p>From there: <a href="provenance.html">time travel and provenance</a>,
-<a href="nql.html">the query language</a>, or
-<a href="nesql.html">plain PostgreSQL SQL over the same store</a>.</p>
+<p>From there: <a href="nesql.html">the query language</a> — standard PostgreSQL SQL plus
+NEDB's temporal and causal clauses — <a href="provenance.html">time travel and provenance</a>,
+and <a href="protocols.html">the wire protocols your tools already speak</a>.</p>
 
 <h2>Who this is for</h2>
 <p>Audit-shaped workloads: agent memory where every belief must trace to its evidence,
@@ -169,9 +171,187 @@ available at that sequence" for pruned history rather than returning a stale val
 """
 
 BODIES["nql"] = """
-<p class="lede">NQL is the native language — built for a store where every version exists and every
-write has a cause. PostgreSQL-flavoured SQL is spoken too (<a href="nesql.html">neSQL</a>); NQL is
-what the engine itself executes.</p>
+<p class="lede">The <b>extended FROM-form</b> is neSQL's other statement shape — the form that
+carries the full clause set natively, and the one embedded cores execute. It began as NQL, the
+project's first query language; today it is folded into neSQL as an equal form, not a separate
+dialect (<a href="nesql.html">see the language overview</a>).</p>
+
+<h2>Clause grammar</h2>
+<pre><code>FROM &lt;collection&gt;
+  [ AS OF &lt;seq&gt; ]                            transaction time
+  [ VALID AS OF "&lt;date&gt;" ]                   valid time
+  [ WHERE &lt;predicate&gt; ]                      full boolean predicate
+  [ SEARCH "&lt;text&gt;" ]                        full-text search
+  [ TRAVERSE &lt;relation&gt; ]                    graph traversal
+  [ TRACE caused_by [REVERSE] ]              causal provenance
+  [ GROUP BY &lt;field&gt; [COUNT|SUM f|AVG f|MIN f|MAX f] ]
+  [ COUNT | SUM f | AVG f | MIN f | MAX f ]  whole-result aggregate
+  [ HAVING &lt;predicate&gt; ]                     filters the AGGREGATED rows
+  [ ORDER BY &lt;field&gt; [ASC|DESC] (, ...) ]
+  [ LIMIT &lt;n&gt; ] [ OFFSET &lt;n&gt; ]</code></pre>
+
+<p>Clauses are evaluated in SQL's order — <code>FROM → WHERE → GROUP BY → HAVING → ORDER BY →
+OFFSET → LIMIT</code> — whatever order you write them. Before 3.3.0 this was wrong in ways that
+lied: <code>LIMIT</code> truncated an aggregate's <i>input</i>, <code>ORDER BY</code> ran before
+grouping (so sorting on <code>count</code> did nothing), and <code>VALID AS OF</code> ran after
+<code>LIMIT</code> in the Python engine.</p>
+
+<h2>Predicates</h2>
+<p><code>WHERE</code> takes a full boolean expression. <code>AND</code> binds tighter than
+<code>OR</code>; parentheses nest to any depth.</p>
+<table>
+<tr><th>Comparison</th><th>Notes</th></tr>
+<tr><td><code>= != &lt; &lt;= &gt; &gt;=</code></td><td></td></tr>
+<tr><td><code>IN (…) / NOT IN (…)</code></td><td>set membership</td></tr>
+<tr><td><code>BETWEEN a AND b</code></td><td>inclusive both ends, as in SQL</td></tr>
+<tr><td><code>LIKE / NOT LIKE / ILIKE</code></td><td><code>%</code> any run, <code>_</code> any one char; <code>ILIKE</code> case-insensitive</td></tr>
+<tr><td><code>IS NULL / IS NOT NULL</code></td><td>matches absent <b>and</b> explicitly-null</td></tr>
+</table>
+
+<div class="callout"><b>Three-valued logic.</b> An ordering comparison against a missing or null
+field is never true — <code>WHERE fee &lt; 5</code> will not return a row with no <code>fee</code>.
+<code>LIKE</code> is false in <i>both</i> polarities, so a null row appears in neither
+<code>LIKE</code> nor <code>NOT LIKE</code>. <code>=</code> and <code>!=</code> <i>do</i> operate on
+null: <code>WHERE fee = NULL</code> selects absent-or-null rows. Use <code>IS NULL</code> to test
+presence explicitly.</div>
+
+<h2>Aggregates</h2>
+<p><code>GROUP BY</code> rows carry the group key, <code>count</code>, and one named aggregate
+(<code>sum_fee</code>, <code>max_price</code>…). The aggregate only considers rows whose target
+field is numeric; a group of 5 where 2 carry numeric <code>price</code> reports
+<code>count: 5</code> and averages over 2. No numeric input aggregates to <code>null</code>,
+never <code>0</code>. Integer inputs stay in 64-bit integers — a sum over satoshi amounts above
+2^53 is exact; <code>AVG</code> is always fractional.</p>
+
+<p>Drop the <code>GROUP BY</code> for a whole-result aggregate (exactly one row);
+<code>COUNT</code> of an empty result is one row holding <code>0</code>, <code>SUM</code> of an
+empty result is <code>null</code>. <code>HAVING</code> runs through the same evaluator as
+<code>WHERE</code> — the whole predicate surface, not a lesser copy.</p>
+
+<h2>Indexes and the planner</h2>
+<p><code>=</code>, <code>IN</code>, <code>BETWEEN</code> and the one-sided inequalities are served
+from a sorted index when one covers the field. Measured on 20,000 rows
+(<code>scripts/bench_index_range.py</code>): a point lookup goes 137 ms → 0.01 ms; a 1%-selective
+<code>BETWEEN</code> 186 ms → 1.1 ms. The planner asks each candidate index how many rows its
+range covers and takes the narrowest; same-field bounds are merged.</p>
+
+<p>An index only <b>narrows candidates</b> — the full predicate is re-evaluated on whatever comes
+back, so the answer never depends on an index existing. Three cases deliberately decline it:</p>
+<ul>
+<li><b><code>IS NULL</code></b> — absent fields are not in the index; a scan would return the exact complement of the answer.</li>
+<li><b>Anything under <code>OR</code>/<code>NOT</code></b> — a disjunct does not constrain the result set.</li>
+<li><b><code>AS OF</code></b> — the index holds current versions only; it cannot answer historical queries.</li>
+</ul>
+
+<h2>Unknown clauses are errors</h2>
+<p>A clause the engine does not implement is rejected with the offending token (HTTP 400) — never
+silently skipped. Before 3.3.0 a misspelled <code>ORDRE BY fee</code> returned unsorted rows with
+HTTP 200; the engine answered a <i>different query</i> than the one asked and said nothing. That
+failure class is closed.</p>
+
+<h2>Cross-engine parity</h2>
+<p>NQL has two independent implementations — the Python reference and the Rust engine — and two
+parity suites (<code>tests/test_nql_predicates.py</code>,
+<code>tests/test_nql_shaping.py</code>) run the same battery through both and assert identical
+answers. They drifted in five places before the gate existed; the gate exists so they cannot
+drift again.</p>
+"""
+
+BODIES["nesql"] = """
+<p class="lede">Nobody should have to learn a query language to use a database. That sentence cost
+us one — and then it built the answer. <b>neSQL is the language NEDB speaks:</b> PostgreSQL's
+SQL, inherited whole, plus the clauses only a permanent, hash-chained store can answer.</p>
+
+<h2>The equation</h2>
+<pre><code>neSQL  =  PostgreSQL SQL          ·  inherited whole, not reimplemented
+       +  NEDB's clauses          ·  AS OF SYSTEM TIME, VALID AS OF, SEARCH, TRACE, TRAVERSE
+       +  the extended FROM-form  ·  NQL folded in — one grammar, two statement forms</code></pre>
+
+<p>Standard SQL is the user-facing surface: if it is valid PostgreSQL and the evaluator can
+parse it, it runs. The additions exist because a store with permanent memory can answer
+questions SQL has no spelling for — <code>SYSTEM_TIME</code>, <code>PERIOD</code> and
+<code>PORTION</code> appear <b>zero</b> times in PostgreSQL's grammar, and
+<code>AS OF SYSTEM TIME</code> is a CockroachDB extension. NEDB adds its clauses
+<b>to</b> PostgreSQL's real grammar — <code>gram.y</code>, 19,513 lines and 492 keywords,
+vendored from 17.4 at <code>vendor/postgresql/</code> with its licence intact — never as
+deviations from it. What the vendored grammar hands over free:
+<code>WITH RECURSIVE</code>, window functions, <code>GROUPING SETS</code>, <code>MERGE</code>.</p>
+
+<h2>Two statement forms, one grammar</h2>
+<p>The same statements can also be written in the <b>extended FROM-form</b> — the form NQL used,
+now one of neSQL's two statement shapes. It begins <code>FROM</code>, carries the full clause
+set (<a href="nql.html">reference</a>), and is what embedded cores execute natively. Routing
+between the forms is <b>structural, never guessed</b>: PostgreSQL has no statement form that
+begins with <code>FROM</code>, so the leading keyword partitions the vocabularies — and a first
+word in neither is refused <i>naming both</i>:</p>
+
+<pre><code>curl -X POST :7070/v1/databases/shop/query -H 'Content-Type: application/json' \
+  -d '{"nql":"GRANT ALL ON users"}'
+# → 400  "GRANT" does not begin a statement in either half of neSQL
+#          FROM-form statements begin with: FROM
+#          SQL statements begin with: SELECT, INSERT, UPDATE, ...</code></pre>
+
+<div class="callout"><b>Dialects by surface</b> (verified against the live 8.0.0 daemon):
+the HTTP <code>/query</code> endpoint and the <code>nesql</code> CLI accept <b>both</b> forms
+through one router (the response names its <code>dialect</code>). The PostgreSQL wire endpoint
+serves SQL, with the NEDB clauses as SQL keywords. Embedded cores execute the FROM-form
+natively — send those statements over HTTP or the wire when you want SQL-form.</div>
+
+<h2>One evaluator, no flag</h2>
+<p>The SQL evaluator answers <b>every <code>SELECT</code> it can parse</b> — joins (nested-loop
+and hash), subqueries, <code>EXISTS</code>, set operations, <code>DISTINCT</code>, derived
+tables, <code>LATERAL</code>, <code>array_agg(x ORDER BY y)</code> — with nothing to enable.
+The translator that once served <code>SELECT</code> is kept only for writes and unparsable
+statements, so every statement gets an answer rather than a syntax error.</p>
+
+<p>NEDB's clauses are SQL keywords now, and they compose:</p>
+<pre><code>-- full-text search + a join, one statement
+SELECT o._id, d.name FROM orders SEARCH 'acme' o
+  JOIN drivers d ON o.driver = d._id;
+
+-- one relation in the past, joined against another at the tip
+SELECT h.total, n.total FROM orders AS OF SYSTEM TIME 412 h
+  JOIN audit n ON h._id = n._id;</code></pre>
+
+<p>There is <b>one implementation</b> of each clause — the SQL side parses, the query engine
+executes — so neither form reimplements the other. <code>AS OF SYSTEM TIME</code>,
+<code>VALID AS OF</code> and <code>SEARCH</code> are unreserved keywords: a collection aliased
+<code>search</code> keeps working.</p>
+
+<h2>Writes</h2>
+<p>SQL write semantics line up with append-only storage: <code>INSERT</code> is a put,
+<code>UPDATE</code> creates a <b>new version</b>, <code>DELETE</code> writes a <b>tombstone</b> —
+and <code>verify()</code> still passes afterwards, because a SQL write is an ordinary engine
+write, not a side door. <code>INSERT</code> requires an explicit column list (there is no schema
+to infer order from) and literal values only. <code>_caused_by</code> is an insertable column —
+provenance does not require a special API.</p>
+
+<p><code>TRUNCATE</code> and DDL are refused <b>on purpose</b>: TRUNCATE discards history — that
+is the one thing NEDB exists to make impossible — and collections are created by the first
+write to them.</p>
+
+<h2>The nesql CLI</h2>
+<pre><code>$ nesql --db ./store query "SELECT who, total FROM orders ORDER BY total DESC"
+$ nesql --db ./store query "FROM orders WHERE total > 150"</code></pre>
+
+<p>One <code>query</code> command, both forms, routed on the leading keyword;
+<code>--nql</code>/<code>--sql</code> force a form when you want <i>that</i> form's error.
+Exit codes carry the verdict: <code>0</code> success, <code>1</code> failure, <code>2</code>
+usage, <code>3</code> <b>could not determine</b> (pruned history — a pruned store is not a
+corrupt one), <code>4</code> not found, <code>5</code> unsupported. <code>root verify</code>
+reports the stored record and the recomputation as two independent facts, never collapsed.</p>
+
+<p>The <code>nesql</code> name is reserved on PyPI, crates.io and npm as 0.0.1 placeholders —
+each loads and answers <code>is_release() == false</code>, because a package that imports
+cleanly and then lies is worse than one that is not published. The engine you install is
+<code>nedb-engine</code>, which already ships the CLI as a console script.</p>
+"""
+
+BODIES["nql"] = """
+<p class="lede">The <b>extended FROM-form</b> is neSQL's other statement shape — the form that
+carries the full clause set natively, and the one embedded cores execute. It began as NQL, the
+project's first query language; today it is folded into neSQL as an equal form, not a separate
+dialect (<a href="nesql.html">see the language overview</a>).</p>
 
 <h2>Clause grammar</h2>
 <pre><code>FROM &lt;collection&gt;
@@ -380,7 +560,7 @@ through psycopg2 — which is libpq.</p>
 <h2>RESP2</h2>
 <p><code>NEDBD_RESP2_PORT=6380 nedbd</code> also speaks RESP2 — <code>redis-cli</code> and
 <code>redis-benchmark</code> work unchanged, with per-database selection
-(<code>SELECT shop</code>) and NQL through <code>EVAL</code>:</p>
+(<code>SELECT shop</code>) and neSQL queries through <code>EVAL</code>:</p>
 
 <pre><code>redis-cli -p 6380 SELECT shop
 redis-cli -p 6380 EVAL 'FROM users AS OF 10 WHERE status = "active"' 0
@@ -647,8 +827,8 @@ nesql --db ./store query "FROM orders WHERE total > 150"
 nesql --db ./store root verify
 nesql --db ./store constitution</code></pre>
 
-<p>Speaks NQL and PostgreSQL SQL through one router (the same <code>nedb_engine::neql::route</code>
-the daemon uses). <code>--json</code> emits exactly one JSON object on stdout with diagnostics on
+<p>Speaks both neSQL statement forms through one router (the same
+<code>nedb_engine::neql::route</code> the daemon uses). <code>--json</code> emits exactly one JSON object on stdout with diagnostics on
 stderr — a pipe stays clean. Exit codes: <code>0</code> success · <code>1</code> failure ·
 <code>2</code> usage · <code>3</code> <b>could not determine</b> (pruned history) · <code>4</code>
 not found · <code>5</code> unsupported. <b>3 is the one that matters:</b> a pruned store is not a
