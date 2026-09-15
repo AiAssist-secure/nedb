@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>neSQL — NEDB Documentation</title>
-<meta name="description" content="PostgreSQL&#x27;s grammar + NEDB&#x27;s clauses, one evaluator, one router.">
+<title>The Query Language — neSQL — NEDB Documentation</title>
+<meta name="description" content="PostgreSQL SQL + the extended FROM-form: one grammar, one evaluator, one router.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -70,8 +70,8 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="index" href="index.html">Introduction</a>
   <div class="sgroup">Core concepts</div>
   <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
-  <a class="item" data-slug="nql" href="nql.html">The Query Language (NQL)</a>
-  <a class="item" data-slug="nesql" href="nesql.html">neSQL</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
   <div class="sgroup">Running it</div>
   <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
   <a class="item" data-slug="durability" href="durability.html">Durability</a>
@@ -84,7 +84,7 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="releasing" href="releasing.html">Releasing</a>
 </nav>
 <main class="main"><div class="content">
-  <div class="crumbs"><a href="index.html">NEDB Docs</a> / Core concepts / neSQL</div>
+  <div class="crumbs"><a href="index.html">NEDB Docs</a> / Core concepts / The Query Language — neSQL</div>
   
 <p class="lede">Nobody should have to learn a query language to use a database. That sentence cost
 us one. neSQL is the name for what NEDB now speaks: <b>PostgreSQL's SQL, inherited whole — plus the
@@ -160,7 +160,7 @@ cleanly and then lies is worse than one that is not published. The engine you in
 <code>nedb-engine</code>, which already ships the CLI as a console script.</p>
 
   <div class="editlink">Found something wrong or missing? <a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — these pages are generated from <code>tools/build_docs_site.py</code>.</div>
-  <div class="pager"><a class="prev" href="nql.html"><small>← Previous</small>The Query Language (NQL)</a><a class="next" href="protocols.html"><small>Next →</small>Wire Protocols</a></div>
+  <div class="pager"><a class="prev" href="provenance.html"><small>← Previous</small>Provenance &amp; Time</a><a class="next" href="nql.html"><small>Next →</small>The FROM-form in Depth</a></div>
 </div></main>
 </div>
 <script>

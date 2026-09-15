@@ -70,8 +70,8 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="index" href="index.html">Introduction</a>
   <div class="sgroup">Core concepts</div>
   <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
-  <a class="item" data-slug="nql" href="nql.html">The Query Language (NQL)</a>
-  <a class="item" data-slug="nesql" href="nesql.html">neSQL</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
   <div class="sgroup">Running it</div>
   <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
   <a class="item" data-slug="durability" href="durability.html">Durability</a>
@@ -98,6 +98,7 @@ and it can prove all four, offline, to a third party.</p>
 <li><b>Causality is data.</b> A write can cite the writes that caused it (<code>caused_by</code>), and <code>TRACE</code> walks that graph in both directions as a query.</li>
 <li><b>Provenance costs speed, not correctness.</b> Time-travel reads run at ~70% of current-state read speed.</li>
 <li><b>One core, three languages, one version.</b> Python, Node and Rust all bind the same Rust engine; PyPI, npm and crates.io publish in lockstep from a single git tag.</li>
+<li><b>You query it in SQL.</b> neSQL inherits PostgreSQL's grammar whole and extends it with the clauses a permanent store can answer — you don't learn a new query language, you learn the additions.</li>
 </ul>
 
 <h2>Five-minute start</h2>
@@ -108,13 +109,14 @@ and it can prove all four, offline, to a third party.</p>
 db = NEDB("./mydata")                      # durable, hash-chained
 db.put("users", "alice", {"name": "Alice", "age": 31})
 
-db.query('FROM users WHERE age > 30')       # NQL — the native language
+db.query('SELECT * FROM users WHERE age > 30')   # PostgreSQL SQL — the daemon speaks it
+db.query('FROM users WHERE age > 30')            # the extended FROM-form (embedded cores)
 db.head                                     # the 64-char BLAKE2b Merkle head
 db.verify()                                 # True — the chain is intact</code></pre>
 
-<p>From there: <a href="provenance.html">time travel and provenance</a>,
-<a href="nql.html">the query language</a>, or
-<a href="nesql.html">plain PostgreSQL SQL over the same store</a>.</p>
+<p>From there: <a href="nesql.html">the query language</a> — standard PostgreSQL SQL plus
+NEDB's temporal and causal clauses — <a href="provenance.html">time travel and provenance</a>,
+and <a href="protocols.html">the wire protocols your tools already speak</a>.</p>
 
 <h2>Who this is for</h2>
 <p>Audit-shaped workloads: agent memory where every belief must trace to its evidence,

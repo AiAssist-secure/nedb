@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The Query Language (NQL) — NEDB Documentation</title>
-<meta name="description" content="Full grammar reference: clauses, predicates, three-valued logic, aggregates.">
+<title>The FROM-form in Depth — NEDB Documentation</title>
+<meta name="description" content="Full clause reference: predicates, three-valued logic, aggregates, indexes.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -70,8 +70,8 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="index" href="index.html">Introduction</a>
   <div class="sgroup">Core concepts</div>
   <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
-  <a class="item" data-slug="nql" href="nql.html">The Query Language (NQL)</a>
-  <a class="item" data-slug="nesql" href="nesql.html">neSQL</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
   <div class="sgroup">Running it</div>
   <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
   <a class="item" data-slug="durability" href="durability.html">Durability</a>
@@ -84,11 +84,12 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="releasing" href="releasing.html">Releasing</a>
 </nav>
 <main class="main"><div class="content">
-  <div class="crumbs"><a href="index.html">NEDB Docs</a> / Core concepts / The Query Language (NQL)</div>
+  <div class="crumbs"><a href="index.html">NEDB Docs</a> / Core concepts / The FROM-form in Depth</div>
   
-<p class="lede">NQL is the native language — built for a store where every version exists and every
-write has a cause. PostgreSQL-flavoured SQL is spoken too (<a href="nesql.html">neSQL</a>); NQL is
-what the engine itself executes.</p>
+<p class="lede">The <b>extended FROM-form</b> is neSQL's other statement shape — the form that
+carries the full clause set natively, and the one embedded cores execute. It began as NQL, the
+project's first query language; today it is folded into neSQL as an equal form, not a separate
+dialect (<a href="nesql.html">see the language overview</a>).</p>
 
 <h2>Clause grammar</h2>
 <pre><code>FROM &lt;collection&gt;
@@ -171,7 +172,7 @@ answers. They drifted in five places before the gate existed; the gate exists so
 drift again.</p>
 
   <div class="editlink">Found something wrong or missing? <a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — these pages are generated from <code>tools/build_docs_site.py</code>.</div>
-  <div class="pager"><a class="prev" href="provenance.html"><small>← Previous</small>Provenance &amp; Time</a><a class="next" href="nesql.html"><small>Next →</small>neSQL</a></div>
+  <div class="pager"><a class="prev" href="nesql.html"><small>← Previous</small>The Query Language — neSQL</a><a class="next" href="protocols.html"><small>Next →</small>Wire Protocols</a></div>
 </div></main>
 </div>
 <script>

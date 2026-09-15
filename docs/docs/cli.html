@@ -70,8 +70,8 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="index" href="index.html">Introduction</a>
   <div class="sgroup">Core concepts</div>
   <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
-  <a class="item" data-slug="nql" href="nql.html">The Query Language (NQL)</a>
-  <a class="item" data-slug="nesql" href="nesql.html">neSQL</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
   <div class="sgroup">Running it</div>
   <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
   <a class="item" data-slug="durability" href="durability.html">Durability</a>
@@ -111,8 +111,8 @@ nesql --db ./store query "FROM orders WHERE total > 150"
 nesql --db ./store root verify
 nesql --db ./store constitution</code></pre>
 
-<p>Speaks NQL and PostgreSQL SQL through one router (the same <code>nedb_engine::neql::route</code>
-the daemon uses). <code>--json</code> emits exactly one JSON object on stdout with diagnostics on
+<p>Speaks both neSQL statement forms through one router (the same
+<code>nedb_engine::neql::route</code> the daemon uses). <code>--json</code> emits exactly one JSON object on stdout with diagnostics on
 stderr — a pipe stays clean. Exit codes: <code>0</code> success · <code>1</code> failure ·
 <code>2</code> usage · <code>3</code> <b>could not determine</b> (pruned history) · <code>4</code>
 not found · <code>5</code> unsupported. <b>3 is the one that matters:</b> a pruned store is not a

@@ -70,8 +70,8 @@ td:first-child{color:var(--text);font-weight:600}
   <a class="item" data-slug="index" href="index.html">Introduction</a>
   <div class="sgroup">Core concepts</div>
   <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
-  <a class="item" data-slug="nql" href="nql.html">The Query Language (NQL)</a>
-  <a class="item" data-slug="nesql" href="nesql.html">neSQL</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
   <div class="sgroup">Running it</div>
   <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
   <a class="item" data-slug="durability" href="durability.html">Durability</a>
@@ -136,14 +136,14 @@ through psycopg2 — which is libpq.</p>
 <h2>RESP2</h2>
 <p><code>NEDBD_RESP2_PORT=6380 nedbd</code> also speaks RESP2 — <code>redis-cli</code> and
 <code>redis-benchmark</code> work unchanged, with per-database selection
-(<code>SELECT shop</code>) and NQL through <code>EVAL</code>:</p>
+(<code>SELECT shop</code>) and neSQL queries through <code>EVAL</code>:</p>
 
 <pre><code>redis-cli -p 6380 SELECT shop
 redis-cli -p 6380 EVAL 'FROM users AS OF 10 WHERE status = "active"' 0
 redis-cli -p 6380 EVAL 'FROM beliefs TRACE caused_by' 0</code></pre>
 
   <div class="editlink">Found something wrong or missing? <a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — these pages are generated from <code>tools/build_docs_site.py</code>.</div>
-  <div class="pager"><a class="prev" href="nesql.html"><small>← Previous</small>neSQL</a><a class="next" href="durability.html"><small>Next →</small>Durability</a></div>
+  <div class="pager"><a class="prev" href="nql.html"><small>← Previous</small>The FROM-form in Depth</a><a class="next" href="durability.html"><small>Next →</small>Durability</a></div>
 </div></main>
 </div>
 <script>
