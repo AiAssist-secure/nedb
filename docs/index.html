@@ -1,346 +1,514 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NEDB — content-addressed Merkle DAG, bi-temporal, causal, embedded database</title>
-<meta name="description" content="NEDB v2.0.27 — content-addressed Merkle DAG storage, BLAKE2b-verified immutable objects, instant warm start via MANIFEST, deferred cold scan, SSE log stream, Rust v2 engine via --dag, bi-temporal queries, causal write provenance, AES-256-GCM encryption, SQL/Redis/MongoDB adapters, RESP2 wire protocol. pip install nedb-engine." />
-<meta property="og:title" content="NEDB v2.0.27 — The DAG Engine" />
-<meta property="og:description" content="Content-addressed Merkle DAG embedded database. Every document version is an immutable, BLAKE2b-verified object. Instant warm start, deferred cold scan, SSE log stream. pip install nedb-engine." />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEDB — the database that remembers why</title>
+<meta name="description" content="NEDB: content-addressed Merkle DAG, hash-chained, time-traveling, bi-temporal, causally-provable embedded database. Free under $1M revenue. pip install nedb-engine.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #0a0d11; --bg2: #0e1217; --panel: #12171e; --line: #1f2630;
-    --ink: #e9eef5; --muted: #93a0b1; --faint: #5f6b7a;
-    --accent: #34d399; --accent2: #22d3ee; --accent-soft: #6ee7b7;
-    --red: #f87171; --amber: #fbbf24; --indigo: #818cf8;
-    --radius: 14px; --maxw: 1060px;
-  }
-  * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  body {
-    margin: 0; background: radial-gradient(1100px 560px at 50% -12%, #122019 0%, var(--bg) 58%);
-    color: var(--ink); font-family: "Inter", system-ui, -apple-system, sans-serif; line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-  }
-  a { color: inherit; text-decoration: none; }
-  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
-  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
-  .accent { color: var(--accent); }
+:root{
+  --bg:#0b0e14; --bg2:#0f131c; --panel:#121724; --panel2:#161c2b;
+  --line:#232b3d; --line2:#2c3550;
+  --text:#e8ecf4; --dim:#9aa5bd; --faint:#6b7690;
+  --amber:#f97316; --amber2:#fbbf24; --emerald:#34d399; --indigo:#818cf8; --cyan:#22d3ee; --rose:#fb7185; --violet:#a78bfa;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Inter',system-ui,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:0 32px}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
 
-  header.nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(10px); background: #0a0d11cc; border-bottom: 1px solid var(--line); }
-  .nav-in { display: flex; align-items: center; justify-content: space-between; height: 60px; }
-  .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; letter-spacing: -0.3px; }
-  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
-  .nav-links { display: flex; gap: 20px; align-items: center; font-size: 14px; color: var(--muted); font-weight: 500; }
-  .nav-links a:hover { color: var(--ink); }
-  .nav-cta { border: 1px solid var(--line); padding: 7px 13px; border-radius: 9px; color: var(--ink) !important; }
-  .nav-cta:hover { border-color: var(--accent); }
-  @media (max-width: 680px) { .nav-links a.hide { display: none; } }
+/* ── hero ── */
+.hero{position:relative;padding:88px 0 72px;border-bottom:1px solid var(--line);overflow:hidden;
+  background:radial-gradient(1200px 500px at 70% -10%, rgba(249,115,22,.10), transparent 60%),
+             radial-gradient(900px 400px at 10% 110%, rgba(52,211,153,.07), transparent 60%);}
+.hero .chain{position:absolute;inset:0;opacity:.35;font-family:var(--mono);font-size:11px;color:var(--faint);word-break:break-all;line-height:1.9;pointer-events:none;user-select:none}
+.hero .inner{position:relative}
+.kicker{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);border:1px solid rgba(249,115,22,.35);background:rgba(249,115,22,.08);padding:7px 14px;border-radius:999px}
+.kicker .dot{width:7px;height:7px;border-radius:50%;background:var(--emerald);box-shadow:0 0 10px var(--emerald)}
+h1.title{font-size:clamp(38px,6vw,64px);font-weight:800;letter-spacing:-.03em;line-height:1.05;margin:26px 0 18px}
+h1.title .grad{background:linear-gradient(92deg,var(--amber),var(--amber2) 55%,var(--emerald));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{max-width:760px;font-size:19px;color:var(--dim)}
+.lede b{color:var(--text)}
+.installbar{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}
+.installbar code{font-family:var(--mono);font-size:13.5px;background:var(--panel);border:1px solid var(--line2);padding:11px 16px;border-radius:10px;color:var(--emerald)}
+.installbar code b{color:var(--faint);font-weight:400}
+.metarow{display:flex;flex-wrap:wrap;gap:22px;margin-top:26px;font-family:var(--mono);font-size:12.5px;color:var(--faint)}
+.metarow span b{color:var(--dim);font-weight:500}
 
-  .hero { padding: 74px 0 30px; }
-  .relpill { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--accent); background: #34d39915; border: 1px solid #34d39933; padding: 5px 12px; border-radius: 999px; margin-bottom: 22px; }
-  .relpill .v { color: var(--ink); }
-  h1 { font-size: clamp(40px, 7vw, 78px); line-height: 0.98; letter-spacing: -2px; margin: 0 0 14px; font-weight: 800; }
-  .tag { font-size: clamp(17px, 2.3vw, 22px); color: var(--muted); max-width: 660px; margin: 0 0 26px; }
-  .tag b { color: var(--ink); font-weight: 600; }
-  .cta { display: flex; flex-wrap: wrap; gap: 11px; align-items: center; margin-bottom: 14px; }
-  .btn { padding: 12px 20px; border-radius: 11px; font-weight: 600; font-size: 15px; border: 1px solid transparent; }
-  .btn-primary { background: var(--accent); color: #06210f; }
-  .btn-primary:hover { background: var(--accent-soft); }
-  .btn-ghost { border-color: var(--line); color: var(--ink); }
-  .btn-ghost:hover { border-color: var(--accent); }
-  .install { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
-  .install code { background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; padding: 9px 14px; font-size: 14px; display: inline-block; }
-  .badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 22px; }
-  .badges img { height: 20px; }
+/* ── sections ── */
+section{padding:72px 0;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--amber);margin-bottom:14px}
+h2{font-size:clamp(26px,3.4vw,38px);font-weight:800;letter-spacing:-.02em;line-height:1.15;margin-bottom:16px}
+.sub{max-width:780px;color:var(--dim);font-size:16.5px;margin-bottom:36px}
+.sub b{color:var(--text)}
 
-  .grid2 { display: grid; grid-template-columns: 1.02fr 0.98fr; gap: 38px; align-items: center; }
-  @media (max-width: 880px) { .grid2 { grid-template-columns: 1fr; gap: 26px; } }
+/* four axes */
+.axes{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+@media(max-width:900px){.axes{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.axes{grid-template-columns:1fr}}
+.axis{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:16px;padding:26px 22px;position:relative;overflow:hidden}
+.axis::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.axis:nth-child(1)::before{background:var(--indigo)} .axis:nth-child(2)::before{background:var(--cyan)}
+.axis:nth-child(3)::before{background:var(--violet)} .axis:nth-child(4)::before{background:var(--amber)}
+.axis .q{font-family:var(--mono);font-size:12px;color:var(--faint);margin-bottom:10px}
+.axis h3{font-size:21px;font-weight:700;letter-spacing:-.01em;margin-bottom:8px}
+.axis p{font-size:14px;color:var(--dim)}
+.axis .clause{display:inline-block;margin-top:14px;font-family:var(--mono);font-size:12.5px;color:var(--amber2);background:rgba(249,115,22,.09);border:1px solid rgba(249,115,22,.25);padding:5px 10px;border-radius:8px}
 
-  .code { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: 0 26px 60px -34px #000; }
-  .code .bar { display: flex; gap: 7px; align-items: center; padding: 12px 15px; border-bottom: 1px solid var(--line); background: #0d1218; }
-  .d { width: 11px; height: 11px; border-radius: 50%; } .d.r{background:#ff5f57}.d.y{background:#febc2e}.d.g{background:#28c840}
-  .code .fn { margin-left: 8px; font-size: 12px; color: var(--faint); }
-  pre { margin: 0; padding: 18px; overflow-x: auto; font-family: "JetBrains Mono", monospace; font-size: 13px; line-height: 1.7; }
-  .k{color:#7fb0ff}.s{color:var(--accent-soft)}.c{color:var(--faint);font-style:italic}.f{color:var(--accent2)}.n{color:#fbbf24}
+/* code blocks */
+.codecard{background:#0a0d14;border:1px solid var(--line2);border-radius:14px;overflow:hidden;margin-top:28px}
+.codecard .bar{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.codecard .bar i{width:11px;height:11px;border-radius:50%;display:block}
+.codecard .bar .r{background:#ff5f57}.codecard .bar .y{background:#febc2e}.codecard .bar .g{background:#28c840}
+.codecard .bar span{margin-left:8px;font-family:var(--mono);font-size:12px;color:var(--faint)}
+.codecard pre{padding:20px 22px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.75;color:#d5dde8}
+.c-k{color:#c792ea}.c-s{color:#c3e88d}.c-f{color:#82aaff}.c-c{color:#5b667d;font-style:italic}.c-n{color:#f78c6c}.c-h{color:#ffcb6b}
 
-  section { padding: 52px 0; border-top: 1px solid var(--line); }
-  .kick { font-size: 12.5px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--accent); font-weight: 600; margin-bottom: 10px; }
-  h2 { font-size: clamp(24px, 3.3vw, 34px); letter-spacing: -0.8px; margin: 0 0 14px; font-weight: 700; }
-  p.lede { color: var(--muted); max-width: 720px; font-size: 16.5px; }
+/* comparison matrix */
+.matrixwrap{overflow-x:auto;border:1px solid var(--line2);border-radius:14px;margin-top:8px}
+table.matrix{width:100%;border-collapse:collapse;font-size:14px;min-width:760px}
+.matrix th{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:14px 16px;background:var(--panel);border-bottom:1px solid var(--line2);white-space:nowrap}
+.matrix th.nedb{color:var(--amber)}
+.matrix td{padding:13px 16px;border-bottom:1px solid var(--line);color:var(--dim);vertical-align:top}
+.matrix tr:last-child td{border-bottom:none}
+.matrix td:first-child{color:var(--text);font-weight:600;white-space:nowrap}
+.matrix td.nedb{color:var(--text);background:rgba(249,115,22,.05)}
+.yes{color:var(--emerald);font-weight:700}
+.no{color:var(--rose);font-weight:600}
+.part{color:var(--amber2);font-weight:600}
+.foot{font-size:12.5px;color:var(--faint);margin-top:14px}
+.foot sup{color:var(--amber2)}
 
-  /* release notes */
-  .rel { display: grid; gap: 12px; margin-top: 22px; }
-  .relrow { display: grid; grid-template-columns: 110px 1fr; gap: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; background: var(--bg2); }
-  @media (max-width: 640px){ .relrow{ grid-template-columns: 1fr; gap: 6px; } }
-  .relrow .ver { font-family: "JetBrains Mono", monospace; font-weight: 700; color: var(--accent); }
-  .relrow h3 { margin: 0 0 4px; font-size: 15.5px; }
-  .relrow p { margin: 0; color: var(--muted); font-size: 14.5px; }
+/* benchmarks */
+.benchgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:26px}
+@media(max-width:900px){.benchgrid{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.benchgrid{grid-template-columns:1fr}}
+.stat{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:14px;padding:22px}
+.stat .num{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--emerald);letter-spacing:-.02em}
+.stat .num small{font-size:15px;color:var(--dim);font-weight:500}
+.stat .lbl{font-size:13.5px;color:var(--dim);margin-top:6px}
+table.plain{width:100%;border-collapse:collapse;font-size:13.5px}
+.plain th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:10px 14px;border-bottom:1px solid var(--line2)}
+.plain td{padding:10px 14px;border-bottom:1px solid var(--line);color:var(--dim);font-family:var(--mono);font-size:12.5px}
+.plain td:first-child{color:var(--text);font-family:var(--sans);font-size:13.5px}
+.plain tr:last-child td{border-bottom:none}
+.benchtwo{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:900px){.benchtwo{grid-template-columns:1fr}}
+.benchcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+.benchcard h4{font-size:14.5px;font-weight:700;margin-bottom:4px}
+.benchcard .src{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-bottom:14px}
 
-  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
-  @media (max-width: 820px){ .cards{ grid-template-columns: 1fr; } }
-  .card { border: 1px solid var(--line); background: linear-gradient(180deg, var(--panel), #0f141a); border-radius: var(--radius); padding: 20px; }
-  .card h3 { margin: 0 0 7px; font-size: 16px; }
-  .card p { margin: 0; color: var(--muted); font-size: 14px; }
-  .card .ic { font-size: 18px; margin-bottom: 8px; }
+/* hash chain viz */
+.chainviz{display:flex;flex-direction:column;gap:0;margin-top:30px;font-family:var(--mono);font-size:12.5px}
+.block{display:grid;grid-template-columns:150px 1fr 190px;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:16px 20px}
+.block .t{color:var(--amber2)} .block .d{color:var(--dim)} .block .h{color:var(--emerald);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.linkarrow{align-self:center;color:var(--faint);padding:4px 0 4px 20px;font-size:12px}
 
-  /* grammar table */
-  .gram { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; margin-top: 22px; overflow-x: auto; }
-  .gram table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
-  .gram th { text-align: left; color: var(--faint); font-weight: 600; font-size: 11.5px; letter-spacing: 1px; text-transform: uppercase; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-  .gram td { padding: 8px 0; border-bottom: 1px solid #1a202a; vertical-align: top; }
-  .gram td:first-child { font-family: "JetBrains Mono", monospace; color: var(--accent2); padding-right: 18px; white-space: nowrap; }
-  .gram td:last-child { color: var(--muted); }
-  .gram tr:last-child td { border-bottom: none; }
+/* pillars */
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:900px){.pillars{grid-template-columns:1fr}}
+.pillar{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
+.pillar .ic{font-size:22px;margin-bottom:12px}
+.pillar h3{font-size:16.5px;font-weight:700;margin-bottom:8px}
+.pillar p{font-size:14px;color:var(--dim)}
+.pillar code{font-family:var(--mono);font-size:12px;color:var(--amber2)}
 
-  footer { border-top: 1px solid var(--line); padding: 38px 0 60px; color: var(--faint); font-size: 14px; }
-  footer .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px; align-items: center; }
-  footer a { color: var(--muted); } footer a:hover { color: var(--ink); }
+/* honesty */
+.honesty{background:linear-gradient(180deg,rgba(52,211,153,.05),transparent);border:1px solid rgba(52,211,153,.22);border-radius:16px;padding:30px}
+.honesty h3{color:var(--emerald);font-size:17px;margin-bottom:14px}
+.honesty ul{list-style:none;display:grid;gap:10px}
+.honesty li{font-size:14.5px;color:var(--dim);padding-left:26px;position:relative}
+.honesty li::before{content:'✓';position:absolute;left:0;color:var(--emerald);font-weight:700}
+
+/* timeline */
+.timeline{display:grid;gap:0;border-left:2px solid var(--line2);margin-left:8px}
+.tl{position:relative;padding:0 0 26px 28px}
+.tl::before{content:'';position:absolute;left:-7px;top:6px;width:12px;height:12px;border-radius:50%;background:var(--amber);border:3px solid var(--bg)}
+.tl .v{font-family:var(--mono);font-size:12.5px;color:var(--amber2)}
+.tl .t{font-size:15.5px;font-weight:700;margin:2px 0}
+.tl p{font-size:13.5px;color:var(--dim)}
+
+/* footer */
+footer{padding:56px 0 72px;text-align:center}
+footer .cta{font-size:clamp(22px,3vw,30px);font-weight:800;letter-spacing:-.02em;margin-bottom:14px}
+footer p{color:var(--dim);font-size:14.5px}
+footer .btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:26px}
+.btn{display:inline-block;font-weight:600;font-size:14.5px;padding:12px 24px;border-radius:11px;border:1px solid var(--line2);color:var(--text);transition:.15s}
+.btn:hover{text-decoration:none;border-color:var(--amber)}
+.btn.primary{background:linear-gradient(92deg,var(--amber),#ea580c);border:none;color:#0b0e14}
+.btn.primary:hover{filter:brightness(1.1)}
+.credit{margin-top:44px;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+header.topnav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);background:rgba(11,14,20,.82);border-bottom:1px solid var(--line)}
+header.topnav a:hover{color:var(--text) !important;text-decoration:none}
+header.topnav .navcta{border:1px solid var(--line2);padding:7px 14px;border-radius:9px;color:var(--text)}
+header.topnav .navcta:hover{border-color:var(--amber)}
+.pillar a{color:var(--text)} .pillar a:hover{color:var(--cyan)}
 </style>
 </head>
 <body>
 
-<header class="nav">
-  <div class="wrap nav-in">
-    <div class="brand"><span class="dot"></span> NEDB</div>
-    <nav class="nav-links">
-      <a class="hide" href="#install">Install</a>
-      <a class="hide" href="#whatsnew">Releases</a>
-      <a class="hide" href="#dag">DAG Engine</a>
-      <a class="hide" href="#server">Server</a>
-      <a href="reference.html">Docs</a>
-      <a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/SPEC.md">Spec</a>
-      <a class="nav-cta" href="https://github.com/Eth-Interchained/nedb">GitHub &rarr;</a>
+<header class="topnav">
+  <div class="wrap" style="display:flex;align-items:center;justify-content:space-between;height:58px">
+    <a href="index.html" style="display:flex;align-items:center;gap:9px;font-weight:800;letter-spacing:-.02em;color:var(--text);text-decoration:none"><span style="width:10px;height:10px;border-radius:50%;background:var(--emerald);box-shadow:0 0 14px var(--emerald);display:inline-block"></span>NEDB</a>
+    <nav style="display:flex;gap:20px;align-items:center;font-size:13.5px;font-weight:500;flex-wrap:wrap">
+      <a href="#differentiator" style="color:var(--dim)">Provenance</a>
+      <a href="#comparisons" style="color:var(--dim)">Comparisons</a>
+      <a href="#performance" style="color:var(--dim)">Performance</a>
+      <a href="#track-record" style="color:var(--dim)">History</a>
+      <a href="reference.html" style="color:var(--dim)">Reference</a>
+      <a href="https://github.com/Eth-Interchained/nedb" target="_blank" rel="noopener noreferrer" class="navcta">GitHub</a>
     </nav>
   </div>
 </header>
 
-<section class="hero">
-  <div class="wrap grid2">
-    <div>
-      <span class="relpill">&#9679; <span class="v mono">v2.0.27</span> &mdash; The DAG Engine</span>
-      <h1>NEDB</h1>
-      <p class="tag"><b>Content-addressed Merkle DAG</b> for embedded data. Every document version is an immutable, BLAKE2b-verified object &mdash; with bi-temporal queries, causal write provenance, and a Rust v2 engine. Instant warm start via MANIFEST. No corruption possible.</p>
-      <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Eth-Interchained/nedb">View on GitHub</a>
-        <a class="btn btn-ghost" href="https://studio.interchained.org">NEDB Studio &rarr;</a>
+<div class="hero">
+  <div class="chain" aria-hidden="true">9c14e07a8f3b1d55 · 7af3c11e42d9a087 · e3b0c44298fc1c14 · 5d81f9a2c47b0e63 · a4127fe09b3d5c88 · 0f6e23d1b7a94c50 · 88e1b4c72fa03d69 · 3dd0a9f14b7e62c5 · b2094c7e51a8fd36 · 14a7e9d3c05b28f4 · 7c93e1a540b2d6f8 · 62f0d8b3a51c97e4 · 09d4b6a2e7c815f3 · 5a13c7e94d208bf6 · e7b29a45d1c306f8</div>
+  <div class="wrap inner">
+    <div class="kicker"><span class="dot"></span> nedb-engine v8.0.0 · live on PyPI · npm · crates.io</div>
+    <h1 class="title">Every database stores <span class="grad">what</span>.<br>NEDB also stores <span class="grad">when, when it was true, and why.</span></h1>
+    <p class="lede">NEDB is an embedded, tamper-evident database built on a <b>BLAKE2b hash chain</b> and a <b>content-addressed Merkle DAG</b>. Every write is a new immutable version. Every row can carry a <b>causal edge</b> naming the writes that caused it. Any auditor can <b>prove the history was never altered</b> — offline, without trusting the server.</p>
+    <div class="installbar">
+      <code>pip install nedb-engine</code>
+      <code>npm install nedb-engine</code>
+      <code>cargo add nedb-engine</code>
+      <code><b># one Rust core → three registries, one version, one tag</b></code>
+    </div>
+    <div class="metarow">
+      <span><b>License</b> BUSL-1.1 — free under $1M revenue, Apache 2.0 at the Change Date</span>
+      <span><b>In production</b> since June 2026</span>
+      <span><b>Platforms</b> macOS arm64+x86_64 · Linux glibc+musl · Windows</span>
+    </div>
+  </div>
+</div>
+
+<section id="differentiator">
+  <div class="wrap">
+    <div class="eyebrow">The differentiator</div>
+    <h2>Four axes. Everyone else ships one.</h2>
+    <p class="sub">A relational database answers <b>what is the value now?</b> NEDB answers four questions natively — not with triggers and side tables, but with queryable, indexed, hash-chained primitives.</p>
+    <div class="axes">
+      <div class="axis">
+        <div class="q">Question 1</div>
+        <h3>What?</h3>
+        <p>Current state, stored as content-addressed objects, BLAKE2b-verified on every read.</p>
+        <span class="clause">every document</span>
       </div>
-      <div class="install">
-        <code class="mono"><span class="accent">$</span> pip install nedb-engine</code>
-        <code class="mono"><span class="accent">$</span> npm install nedb-engine</code>
-        <code class="mono"><span class="accent">$</span> NEDBD_DAG=1 NEDB_TMK=&lt;hex&gt; nedbd --data ./data</code>
+      <div class="axis">
+        <div class="q">Question 2</div>
+        <h3>When was it written?</h3>
+        <p>Every version is kept forever. Time travel to any past sequence — no vacuum, no archival tier, no garbage collection.</p>
+        <span class="clause">AS OF &lt;seq&gt;</span>
       </div>
-      <div class="badges">
-        <img alt="PyPI" src="https://img.shields.io/pypi/v/nedb-engine?color=34d399&label=pypi" />
-        <img alt="npm" src="https://img.shields.io/npm/v/nedb-engine?color=22d3ee&label=npm" />
-        <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0--or--later-818cf8" />
-        <img alt="invariants" src="https://img.shields.io/badge/invariants-11%2F11-34d399" />
+      <div class="axis">
+        <div class="q">Question 3</div>
+        <h3>When was it true?</h3>
+        <p>Bi-temporal valid time: what the world believed on a date, independent of when the row was written.</p>
+        <span class="clause">VALID AS OF "&lt;date&gt;"</span>
+      </div>
+      <div class="axis">
+        <div class="q">Question 4</div>
+        <h3>Why did it happen?</h3>
+        <p>Causal provenance: every write can cite the writes that caused it. Trace the chain forward or backward.</p>
+        <span class="clause">TRACE caused_by [REVERSE]</span>
       </div>
     </div>
-    <div class="code">
-      <div class="bar"><span class="d r"></span><span class="d y"></span><span class="d g"></span><span class="fn mono">dag_engine.py</span></div>
-<pre class="mono"><span class="k">from</span> nedb <span class="k">import</span> NEDB
 
-<span class="c"># v2 DAG engine: content-addressed objects</span>
-db = <span class="f">NEDB</span>(<span class="s">"./data"</span>, dag=<span class="k">True</span>)   <span class="c"># or NEDBD_DAG=1</span>
+    <div class="codecard">
+      <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>provenance.py — executed against nedb-engine 8.0.0</span></div>
+<pre><span class="c-k">from</span> nedb <span class="c-k">import</span> NEDB
 
-<span class="c"># Every put becomes an immutable, BLAKE2b-verified</span>
-<span class="c"># object in the Merkle DAG. No AOF, no replay.</span>
-db.<span class="f">put</span>(<span class="s">"claims"</span>, <span class="s">"c1"</span>, {
-    <span class="s">"fact"</span>: <span class="s">"Earth orbits Sun"</span>,
-    <span class="s">"valid_from"</span>: <span class="s">"1543-01-01"</span>,
-    <span class="s">"caused_by"</span>: <span class="s">"obs:heliocentric-model"</span>,
-    <span class="s">"confidence"</span>: <span class="n">0.9999</span>,
-})
+db = NEDB(<span class="c-s">"./mydata"</span>)
 
-<span class="c"># The Merkle head is a real BLAKE2b root over the</span>
-<span class="c"># full DAG of all versions ever written.</span>
-db.<span class="f">head</span>()                  <span class="c"># "b2:7af3..." (DAG root)</span>
+<span class="c-c"># Time travel — the value at any past sequence, forever</span>
+snap = db.seq
+db.put(<span class="c-s">"users"</span>, <span class="c-s">"alice"</span>, {<span class="c-s">"age"</span>: <span class="c-n">32</span>})
+db.get(<span class="c-s">"users"</span>, <span class="c-s">"alice"</span>, as_of=snap)      <span class="c-c"># → the prior version</span>
 
-<span class="c"># Bi-temporal queries unchanged</span>
-db.<span class="f">query</span>(
-    <span class="s">'FROM claims AS OF 200'</span>
-    <span class="s">' VALID AS OF "2024-06-15"'</span>
-    <span class="s">' WHERE confidence > 0.9'</span>
-)
+<span class="c-c"># Causal provenance — an edge in a hash-chained DAG, not a comment field</span>
+db.put(<span class="c-s">"inputs"</span>, <span class="c-s">"msg_1"</span>, {<span class="c-s">"text"</span>: <span class="c-s">"user prefers dark mode"</span>})
+seq_msg = db.seq
+db.put(<span class="c-s">"beliefs"</span>, <span class="c-s">"dark_mode"</span>, {<span class="c-s">"value"</span>: <span class="c-k">True</span>},
+       caused_by=[seq_msg], evidence=<span class="c-s">"user_message"</span>, confidence=<span class="c-n">0.95</span>)
 
-<span class="c"># Cold start is instant — no log replay</span>
-<span class="k">assert</span> db.<span class="f">verify</span>()     <span class="c"># DAG integrity check</span></pre>
+db.query(<span class="c-s">'FROM beliefs WHERE _id = "dark_mode" TRACE caused_by'</span>)     <span class="c-c"># → msg_1</span>
+db.query(<span class="c-s">'FROM inputs  WHERE _id = "msg_1"     TRACE caused_by REVERSE'</span>)  <span class="c-c"># → dark_mode</span>
+
+<span class="c-c"># Tamper evidence — verifiable by anyone, offline</span>
+<span class="c-k">assert</span> db.verify()</pre>
     </div>
   </div>
 </section>
 
-<section id="dag">
+<section id="proof">
   <div class="wrap">
-    <div class="kick">v2.0.27 &middot; The DAG Engine</div>
-    <h2>Content-addressed Merkle DAG &mdash; instant warm start, deferred cold scan, zero corruption</h2>
-    <p class="lede">NEDB v2.0.27 ships the production DAG substrate: every document version is hashed with BLAKE2b and stored as an immutable, addressable object. On restart, <b>MANIFEST</b> restores <span class="mono">seq</span> and the Merkle head in O(1). On the first open of an existing dataset, the daemon accepts connections immediately and runs a <b>deferred background cold scan</b> with a live progress bar; reads work instantly while writes return <span class="mono">503 startup in progress</span> until the scan completes. The Merkle head is updated incrementally on every write &mdash; never recomputed.</p>
-    <div class="cards">
-      <div class="card"><div class="ic">&#127760;</div><h3>Content-addressed objects</h3><p>Every <span class="mono">put</span> writes an immutable object keyed by its BLAKE2b digest. Identical values dedup automatically. Document history is a real DAG of versions, not a sequential log.</p></div>
-      <div class="card"><div class="ic">&#9889;</div><h3>MANIFEST warm start</h3><p><span class="mono">nedbd</span> loads <span class="mono">seq</span> and the current Merkle <span class="mono">head</span> in O(1) from a small <span class="mono">MANIFEST</span> file. Subsequent restarts after the first open are instant &mdash; no scan, no replay, independent of dataset size.</p></div>
-      <div class="card"><div class="ic">&#9203;</div><h3>Deferred cold scan</h3><p>First open of an existing dataset accepts connections immediately. A background thread runs the integrity scan with a live progress bar (rate + ETA); reads serve instantly, writes return <span class="mono">503 startup in progress</span> until the <span class="mono">startup_ready</span> gate flips.</p></div>
-      <div class="card"><div class="ic">&#128737;</div><h3>No corruption possible</h3><p>Objects are immutable and hash-addressed; a corrupted byte changes its hash and the DAG simply ignores it. There is no partially-written AOF tail to recover.</p></div>
-      <div class="card"><div class="ic">&#129518;</div><h3>Rust v2 engine</h3><p>Run with <span class="mono">nedbd --dag</span> or <span class="mono">NEDBD_DAG=1</span> to launch the <span class="mono">nedbd-v2</span> binary &mdash; tokio + axum with <span class="mono">TCP_NODELAY</span>, IdIndex sharded across 256 subdirectories for million-doc scale, and O(1) incremental Merkle head updates.</p></div>
-      <div class="card"><div class="ic">&#128279;</div><h3>O(1) Merkle head</h3><p>The BLAKE2b Merkle head is updated incrementally on every write &mdash; never recomputed. Every response carries the current root over the full DAG of every version ever written, anchorable on-chain, comparable across replicas.</p></div>
-      <div class="card"><div class="ic">&#128465;</div><h3>Tombstone deletes</h3><p>Deletes are tombstone objects in the DAG. History never disappears; <span class="mono">AS OF</span> still sees the pre-delete value, and the head hash still commits to every version ever written.</p></div>
+    <div class="eyebrow">The proof</div>
+    <h2>History you can audit, not just history you have.</h2>
+    <p class="sub">Most systems log events. NEDB <b>chains</b> them. Each write's hash commits to the write before it, the running Merkle head commits to everything, and the state root commits to the present — three separate commitments with different jobs.</p>
+
+    <div class="chainviz">
+      <div class="block"><span class="t">seq 41</span><span class="d">UPDATE orders SET total = 999</span><span class="h">head: b2:9c14e07a8f3b…</span></div>
+      <div class="linkarrow">↓ hashes parent</div>
+      <div class="block"><span class="t">seq 42</span><span class="d">INSERT audit (caused_by → seq 41)</span><span class="h">head: b2:7af3c11e42d9…</span></div>
+      <div class="linkarrow">↓ hashes parent</div>
+      <div class="block"><span class="t">seq 43</span><span class="d">DELETE session (tombstone — history kept)</span><span class="h">head: b2:e3b0c44298fc…</span></div>
+      <div class="linkarrow">↓ verify() recomputes the whole chain</div>
+      <div class="block" style="border-color:rgba(52,211,153,.4)"><span class="t">verify()</span><span class="d">~21,000 BLAKE2b/sec · 30k objects in 1.38 s · tamper ⇒ verdict false</span><span class="h">→ True</span></div>
     </div>
-    <div class="install" style="margin-top:22px">
-      <code class="mono"><span class="accent">$</span> nedbd --dag --data ./data                <span class="c"># launch v2 engine</span></code>
-      <code class="mono"><span class="accent">$</span> NEDBD_DAG=<span class="n">1</span> NEDB_TMK=<span class="s">&lt;hex&gt;</span> nedbd --data ./data <span class="c"># env-driven, encrypted</span></code>
-      <code class="mono"><span class="accent">$</span> curl http://127.0.0.1:7070/events          <span class="c"># SSE — real-time log stream</span></code>
+
+    <div class="pillars" style="margin-top:34px">
+      <div class="pillar">
+        <div class="ic">🔐</div>
+        <h3>Tamper-evident by construction</h3>
+        <p>One flipped byte anywhere in the object store and <code>verify()</code> returns false. Writes are atomic; reads re-verify hashes. There is no mode where the chain is quietly skipped.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">🧬</div>
+        <h3>Provenance is native, not bolted on</h3>
+        <p><code>caused_by</code> is an indexed DAG edge. <code>TRACE</code> walks it in both directions at query speed, and metadata columns (<code>_hash</code>, <code>_seq</code>, <code>_caused_by</code>) select like any other column.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">🤝</div>
+        <h3>Verifiable without trusting the server</h3>
+        <p>Merkle proofs verify locally with <code>verify_proof()</code> — a client can check a row existed at a time without database access. State roots compare two replicas in one hash.</p>
+      </div>
     </div>
   </div>
 </section>
 
-<section id="production">
+<section id="comparisons">
   <div class="wrap">
-    <div class="kick">Production</div>
-    <h2>In production at vision.interchained.org</h2>
-    <p class="lede">NEDB v2.0.27 is serving the Vision DAG engine at <span class="mono">vision.interchained.org</span>: <b>1,310,703</b> sequences indexed, AES-256-GCM encrypted at rest, live at block height <b>620,989</b>. Warm starts return in O(1); cold scans run deferred behind the live socket.</p>
-    <div class="gram" style="margin-top:18px">
-      <table>
-        <thead><tr><th>Operation (10k writes / 100k reads / 30k objects, Intel iMac)</th><th>Throughput</th><th>p50 / p99</th></tr></thead>
+    <div class="eyebrow">Comparisons</div>
+    <h2>How NEDB stacks up.</h2>
+    <p class="sub">Judged on the four axes plus the operational basics. NEDB is a single-node embedded/daemon database — it does not pretend to be a distributed cluster; the comparison is about <b>what a database can be asked and prove</b>.</p>
+
+    <div class="matrixwrap">
+      <table class="matrix">
+        <thead><tr>
+          <th></th><th class="nedb">NEDB</th><th>SQLite</th><th>Redis</th><th>MongoDB</th><th>PostgreSQL</th><th>Dolt</th>
+        </tr></thead>
         <tbody>
-          <tr><td>Sequential writes</td><td>418/s</td><td>2.3 ms / 3.3 ms</td></tr>
-          <tr><td>Point-lookup reads</td><td>478/s</td><td>2.0 ms / 3.0 ms</td></tr>
-          <tr><td>ORDER BY queries</td><td>489/s</td><td>1.8 ms / 4.3 ms</td></tr>
-          <tr><td>Batch writes (500 ops/req)</td><td>1,104 ops/s</td><td>0.9 ms / 1.2 ms</td></tr>
-          <tr><td>Tamper-verify (30k objects)</td><td>~21k BLAKE2b/sec</td><td>1.38 s total</td></tr>
+          <tr><td>Time-travel reads</td><td class="nedb"><span class="yes">✓ any seq, forever</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="part">MVCC, until vacuum</span></td><td><span class="yes">✓ commit-based</span></td></tr>
+          <tr><td>Bi-temporal (valid time)</td><td class="nedb"><span class="yes">✓ native clause</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗ needs extension</span></td><td><span class="no">✗</span></td></tr>
+          <tr><td>Causal provenance (why)</td><td class="nedb"><span class="yes">✓ graph edges + TRACE</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td></tr>
+          <tr><td>Hash-chain tamper evidence</td><td class="nedb"><span class="yes">✓ per write</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="part">Merkle-ish via commits</span></td></tr>
+          <tr><td>Third-party verifiable proofs</td><td class="nedb"><span class="yes">✓ Merkle proofs</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="part">commit hashes</span></td></tr>
+          <tr><td>Encrypted at rest, built-in</td><td class="nedb"><span class="yes">✓ AES-256-GCM</span></td><td><span class="part">via extension</span></td><td><span class="no">✗</span></td><td><span class="part">paid tiers</span></td><td><span class="part">via extension</span></td><td><span class="no">✗</span></td></tr>
+          <tr><td>SQL surface</td><td class="nedb"><span class="yes">✓ PostgreSQL grammar (neSQL)</span></td><td><span class="yes">✓</span></td><td><span class="no">✗</span></td><td><span class="part">own query lang</span></td><td><span class="yes">✓ the standard</span></td><td><span class="yes">✓ MySQL dialect</span></td></tr>
+          <tr><td>Wire protocols</td><td class="nedb"><span class="part">HTTP · RESP2 · PostgreSQL</span></td><td><span class="part">in-process only</span></td><td><span class="yes">✓ RESP2</span></td><td><span class="yes">✓ own</span></td><td><span class="yes">✓ libpq</span></td><td><span class="yes">✓ MySQL</span></td></tr>
+          <tr><td>Embedded (no server)</td><td class="nedb"><span class="yes">✓ Python/Node/Rust</span></td><td><span class="yes">✓</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td></tr>
+          <tr><td>Idempotent, replay-protected writes</td><td class="nedb"><span class="yes">✓</span></td><td><span class="no">✗</span></td><td><span class="part">SETNX-class</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td></tr>
+          <tr><td>Git-style branch / merge of data</td><td class="nedb"><span class="part">via nesql CLI (tag/branch/merge)</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="no">✗</span></td><td><span class="yes">✓ the whole point</span></td></tr>
         </tbody>
+      </table>
+    </div>
+    <p class="foot">SQLite row is the stock engine; extensions (sqlean, SEE) can add pieces. Redis ≥6 has TLS in transit but no native at-rest encryption. MongoDB encrypted storage engine requires Enterprise Advanced. PostgreSQL row reflects core + common extensions (temporal_tables). Every cell is stated to the best of our knowledge as of Sept 2026 — corrections welcome, we apply them publicly.</p>
+
+    <div class="benchtwo" style="margin-top:34px">
+      <div class="benchcard">
+        <h4>Where NEDB wins outright</h4>
+        <p style="font-size:14px;color:var(--dim)">Audit-shaped workloads: agent memory (every belief cites its evidence), blockchain state (itcd runs its chainstate on NEDB), compliance trails, financial ledgers, RAG pipelines where a fact must be traceable to its source, and anything a regulator or a counterparty may one day ask you to prove.</p>
+      </div>
+      <div class="benchcard">
+        <h4>Where to pick something else</h4>
+        <p style="font-size:14px;color:var(--dim)">Massively concurrent distributed writes (Postgres/CockroachDB territory), sub-microsecond cache reads (Redis), or multi-TB analytical scans (column stores). NEDB is honest about its lane: proof-permitted, permanent-history storage for systems that think.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="performance">
+  <div class="wrap">
+    <div class="eyebrow">Performance</div>
+    <h2>Provenance that doesn't cost you the database.</h2>
+    <p class="sub">Every number below is dated, names its machine, and ships with the command that reproduces it. Absolute figures aren't cross-machine comparable — read the ratios. <b>Time travel costs ~30%, not 10×.</b></p>
+
+    <div class="benchgrid">
+      <div class="stat"><div class="num">63.5K<small> /s</small></div><div class="lbl">durable PUTs, hash-chained (15.7 µs avg)</div></div>
+      <div class="stat"><div class="num">1.33M<small> /s</small></div><div class="lbl">point reads of current state</div></div>
+      <div class="stat"><div class="num">942.9K<small> /s</small></div><div class="lbl">reads <b>through time</b> — AS OF queries (70% of current-state speed)</div></div>
+    </div>
+
+    <div class="benchtwo">
+      <div class="benchcard">
+        <div class="src">embedded core · Linux x86-64 · bench/benchmarks.py --save</div>
+        <table class="plain">
+          <tr><th>Operation</th><th>Throughput</th><th>Latency</th></tr>
+          <tr><td>PUT (durable, hash-chained)</td><td>63.5K/s</td><td>15.7 µs</td></tr>
+          <tr><td>GET (current state)</td><td>1.33M/s</td><td>0.75 µs</td></tr>
+          <tr><td>GET (AS OF — time travel)</td><td>942.9K/s</td><td>1.06 µs</td></tr>
+          <tr><td>Query, eq index</td><td>1.45M/s</td><td>0.69 µs</td></tr>
+          <tr><td>Query, full-text SEARCH</td><td>492.3K/s</td><td>2.03 µs</td></tr>
+        </table>
+      </div>
+      <div class="benchcard">
+        <div class="src">daemon over HTTP · v2.2.31, Intel iMac, AES-256-GCM on · tests/test_dag_perf.py</div>
+        <table class="plain">
+          <tr><th>Operation</th><th>Throughput</th><th>p99</th></tr>
+          <tr><td>Sequential writes</td><td>418 ops/s</td><td>3.3 ms</td></tr>
+          <tr><td>Point reads</td><td>478 ops/s</td><td>3.0 ms</td></tr>
+          <tr><td>Batch writes (500/req)</td><td>1,104 ops/s</td><td>1.2 ms</td></tr>
+          <tr><td>Hash join vs nested loop</td><td colspan="2" style="color:var(--emerald)">90.6× faster on equality joins</td></tr>
+          <tr><td>Indexed point lookup (20k rows)</td><td colspan="2" style="color:var(--emerald)">137 ms → 0.01 ms (17,000×)</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="benchcard" style="margin-top:20px">
+      <div class="src">the v3 segment store, measured on a real blockchain node — itcd, FlushStateToDisk on live chainstate</div>
+      <table class="plain">
+        <tr><th>Flush (coins → disk)</th><th>v2 loose store</th><th>v3 segment store</th></tr>
+        <tr><td>2,002 coins / 275 kB</td><td style="color:var(--rose)">minutes</td><td style="color:var(--emerald)">1.93 s</td></tr>
+        <tr><td>2,549 coins / 366 kB</td><td style="color:var(--rose)">minutes</td><td style="color:var(--emerald)">1.71 s</td></tr>
       </table>
     </div>
   </div>
 </section>
 
-<section id="why">
+<section id="surfaces">
   <div class="wrap">
-    <div class="kick">Why NEDB</div>
-    <h2>The first embedded database that answers &ldquo;why does the agent believe X?&rdquo;</h2>
-    <p class="lede">NEDB seals <span class="mono">caused_by</span>, <span class="mono">evidence</span>, and <span class="mono">confidence</span> directly into its Merkle DAG &mdash; so every fact carries a cryptographically-linked audit trail. Combine that with bi-temporal queries and a concurrent Rust core and you get something no other embedded database offers: <b>four-dimensional auditability at embedded-database speed.</b></p>
-    <div class="cards">
-      <div class="card"><div class="ic">&#128344;</div><h3>Bi-temporal Queries</h3><p><span class="mono">VALID AS OF "date"</span> for business time + <span class="mono">AS OF seq</span> for transaction time. Ask the four-dimensional question: &ldquo;what did the system know at seq 200 about what was true on 2024-06-15?&rdquo;</p></div>
-      <div class="card"><div class="ic">&#128279;</div><h3>Causal Write Provenance</h3><p><span class="mono">caused_by</span>, <span class="mono">evidence</span>, <span class="mono">confidence</span> sealed in the DAG. <span class="mono">TRACE caused_by</span> walks backward (why?) and <span class="mono">TRACE caused_by REVERSE</span> walks forward (what did this cause?).</p></div>
-      <div class="card"><div class="ic">&#9889;</div><h3>Concurrent Group-Commit</h3><p>nedbd handles parallel reads and batched writes safely via a lock-free sequencer. ~15&thinsp;K writes/s under load &mdash; without sacrificing durability or chain integrity.</p></div>
-      <div class="card"><div class="ic">&#128260;</div><h3>SQL + Redis + MongoDB Adapters</h3><p>All three wire protocols speak the same Rust engine. Migrate from any stack without changing your queries &mdash; and add RESP2 for <span class="mono">redis-cli</span> compatibility via <span class="mono">NEDBD_RESP2_PORT=6380</span>.</p></div>
-      <div class="card"><div class="ic">&#128274;</div><h3>AES-256-GCM Encryption</h3><p>Set <span class="mono">NEDB_TMK=&lt;32-byte-hex&gt;</span> and every object is encrypted at rest. The DAG remains verifiable; keys never touch storage.</p></div>
-      <div class="card"><div class="ic">&#128295;</div><h3>Self-Healing DAG</h3><p>Structural gaps are detected and auto-repaired on open. Combined with the Rust native core (napi-rs for Node, PyO3 for Python), the same compiled engine powers both runtimes.</p></div>
+    <div class="eyebrow">Surfaces</div>
+    <h2>It speaks what you already speak.</h2>
+    <p class="sub">NEDB is one Rust core with five ways in. No bespoke protocol lock-in — the <b>PostgreSQL grammar is vendored wholesale</b> (19,513 lines, 492 keywords, from PostgreSQL 17.4) and extended with the clauses only a permanent store can answer.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="ic">🐘</div>
+        <h3>PostgreSQL wire protocol</h3>
+        <p><code>psql</code>, psycopg3, asyncpg, JDBC, Metabase, DBeaver — both simple and extended protocols. A SQL <code>UPDATE</code> is a new version, a <code>DELETE</code> is a tombstone, and <code>AS OF SYSTEM TIME</code> works right in your existing SQL.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">🟢</div>
+        <h3>Redis compatible</h3>
+        <p>RESP2 wire protocol answers <code>redis-cli</code> directly, and <code>wrap_redis()</code> shadows an existing Redis app's writes into NEDB with one flag — the audit trail grows behind a running system.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">🐍</div>
+        <h3>Native bindings</h3>
+        <p>Embedded Python and Node cores, a Rust crate, HTTP/JSON, and the <code>nesql</code> CLI that opens a store directly — no daemon, no port, machine-readable exit codes.</p>
+      </div>
+    </div>
+
+    <div class="codecard">
+      <div class="bar"><i class="r"></i><i class="y"></i><i class="c" style="background:#28c840"></i><span>psql — history is a SQL clause</span></div>
+<pre>shop=> <span class="c-k">UPDATE</span> orders <span class="c-k">SET</span> total = <span class="c-n">999</span> <span class="c-k">WHERE</span> _id = <span class="c-s">'o1'</span>;
+shop=> <span class="c-k">SELECT</span> total <span class="c-k">FROM</span> orders <span class="c-k">WHERE</span> _id = <span class="c-s">'o1'</span>;                        <span class="c-c">-- 999</span>
+shop=> <span class="c-k">SELECT</span> total <span class="c-k">FROM</span> orders <span class="c-k">AS OF SYSTEM TIME</span> <span class="c-n">0</span> <span class="c-k">WHERE</span> _id = <span class="c-s">'o1'</span>;   <span class="c-c">-- 120 — the old value, forever</span></pre>
     </div>
   </div>
 </section>
 
-<section id="nql">
+<section id="agent-native">
   <div class="wrap">
-    <div class="kick">NQL Grammar</div>
-    <h2>One query language for all four dimensions</h2>
-    <p class="lede">NQL composes cleanly &mdash; any clause is optional, order is consistent, and the same syntax works across the Python, Node, SQL, Redis, and MongoDB adapters. Identical grammar in the v1 AOF engine and the v2 DAG engine.</p>
-    <div class="gram">
-      <table>
-        <thead><tr><th>Clause</th><th>Description</th></tr></thead>
-        <tbody>
-          <tr><td>FROM &lt;coll&gt;</td><td>Target collection</td></tr>
-          <tr><td>AS OF &lt;seq&gt;</td><td>Transaction-time travel &mdash; read DB state as it existed at sequence number</td></tr>
-          <tr><td>VALID AS OF "&lt;date&gt;"</td><td>Valid-time travel &mdash; filter records whose validity window includes the given date</td></tr>
-          <tr><td>WHERE &lt;expr&gt;</td><td>Filter with equality, comparison, boolean logic, and nested field access</td></tr>
-          <tr><td>SEARCH "text"</td><td>Full-text search via incremental inverted index</td></tr>
-          <tr><td>ORDER BY &lt;field&gt;</td><td>Ordered result set (ascending/descending)</td></tr>
-          <tr><td>TRAVERSE &lt;rel&gt;</td><td>Graph traversal over adjacency-list edges (time-travels with the rest)</td></tr>
-          <tr><td>TRACE caused_by</td><td>Backward causal trace &mdash; follows the provenance chain: why does the agent believe X?</td></tr>
-          <tr><td>TRACE caused_by REVERSE</td><td>Forward causal trace &mdash; what downstream facts did this event produce?</td></tr>
-          <tr><td>LIMIT n</td><td>Cap result count</td></tr>
-          <tr><td>GROUP BY &lt;field&gt; COUNT|SUM|AVG|MIN|MAX</td><td>Aggregations, evaluated after all filters</td></tr>
-        </tbody>
-      </table>
+    <div class="eyebrow">Agent-native</div>
+    <h2>Built for systems that must show their work.</h2>
+    <p class="sub">NEDB was designed in production for AI agent memory — where "the model said so" is not an audit trail. It ships with the machinery to keep one honest.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="ic">🗣️</div>
+        <h3>Cast — English in, queries out</h3>
+        <p>A 3.33M-parameter local model turns prompts into queries on CPU, with the engine checking every plan against the live schema — invented collections get a <code>422 with the reason</code>, never silent zero rows. Drift detection flags hallucinated literals. <code>execute</code> defaults to false.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">🔗</div>
+        <h3>Training-lineage receipts</h3>
+        <p>NEDB's own model was trained with datasets → runs → checkpoints → evals all chained by <code>caused_by</code>. Any score traces to the exact data that produced it. The same primitive is yours for any pipeline.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic">📡</div>
+        <h3>Replication contract</h3>
+        <p><code>tip()</code>, a bounded <code>since()</code> changefeed, and a <code>scan_status()</code> readiness gate — plus state roots to prove two stores agree. SSE streams every write and its new Merkle head, live.</p>
+      </div>
     </div>
   </div>
 </section>
 
-<section id="whatsnew">
+<section id="honesty">
   <div class="wrap">
-    <div class="kick">Release highlights</div>
-    <h2>What's new</h2>
-    <div class="rel">
-      <div class="relrow"><div class="ver">v2.0.27</div><div><h3>Warm start + deferred cold scan + SSE log stream</h3><p>MANIFEST loads <span class="mono">seq</span> and the Merkle head in O(1) on every restart after the first open. Deferred background cold scan accepts connections immediately while reads serve instantly; writes return <span class="mono">503 startup in progress</span> until the <span class="mono">startup_ready</span> gate flips. New <span class="mono">GET /events</span> SSE endpoint for real-time log streaming. <span class="mono">NEDBD_HOST</span> now defaults to <span class="mono">127.0.0.1</span> (security fix). <span class="mono">TCP_NODELAY</span> on the axum listener eliminates the macOS loopback Nagle delay. IdIndex sharded into 256 subdirectories for 1M+ doc scale. Production: 1,310,703 sequences indexed in <span class="mono">vision.interchained.org</span>.</p></div></div>
-      <div class="relrow"><div class="ver">v2.0.4</div><div><h3>The DAG Engine</h3><p>Content-addressed Merkle DAG storage. Every document version is an immutable, BLAKE2b-verified object. <span class="mono">nedbd --dag</span> (or <span class="mono">NEDBD_DAG=1</span>) runs the Rust v2 engine. Instant cold start, no corruption possible, real Merkle head on every response.</p></div></div>
-      <div class="relrow"><div class="ver">v1.0.5</div><div><h3>Bi-temporal stability &amp; Studio GA</h3><p>Production-hardened <span class="mono">VALID AS OF</span> indexing, improved self-healing on corrupt segments, and NEDB Studio goes generally available at <span class="mono">studio.interchained.org</span> &mdash; prompt-to-database GUI with live chain inspection.</p></div></div>
-      <div class="relrow"><div class="ver">v1.0.x</div><div><h3>Rust native core (napi-rs + PyO3)</h3><p>Same compiled Rust core surfaces to Node via napi-rs and to Python via maturin/PyO3. Both <span class="mono">npm install nedb-engine</span> and <span class="mono">pip install nedb-engine</span> ship native binaries with a pure fallback.</p></div></div>
-      <div class="relrow"><div class="ver">v0.9.x</div><div><h3>RESP2 wire protocol + adapters</h3><p>nedbd now speaks RESP2 &mdash; set <span class="mono">NEDBD_RESP2_PORT=6380</span> and connect any <span class="mono">redis-cli</span> client. SQL and MongoDB adapters landed alongside, all sharing the same engine.</p></div></div>
-      <div class="relrow"><div class="ver">v0.8.x</div><div><h3>Causal Write Provenance + bi-temporal</h3><p><span class="mono">caused_by</span>, <span class="mono">evidence</span>, and <span class="mono">confidence</span> are now first-class fields sealed in the hash chain. <span class="mono">TRACE caused_by [REVERSE]</span> introduced. Bi-temporal <span class="mono">VALID AS OF</span> clause added alongside existing <span class="mono">AS OF seq</span>.</p></div></div>
-      <div class="relrow"><div class="ver">v0.7.x</div><div><h3>Concurrent group-commit sequencer + AES-256-GCM</h3><p>nedbd gained a lock-free sequencer for parallel reads and batched writes (~15&thinsp;K writes/s). At-rest encryption via <span class="mono">NEDB_TMK</span> and self-healing chain repair on open also shipped in this cycle.</p></div></div>
-    </div>
-    <p class="lede" style="margin-top:16px">Full history on <a class="accent" href="https://github.com/Eth-Interchained/nedb/releases">GitHub Releases</a>.</p>
-  </div>
-</section>
-
-<section id="server">
-  <div class="wrap grid2">
-    <div>
-      <div class="kick">Run it as a server</div>
-      <h2>nedbd</h2>
-      <p class="lede"><span class="mono">pip install nedb-engine</span> or <span class="mono">npm install nedb-engine</span> ships the daemon. Pass <span class="mono">--dag</span> (or set <span class="mono">NEDBD_DAG=1</span>) to launch the v2 Rust engine binary <span class="mono">nedbd-v2</span> with the content-addressed Merkle DAG. Connect clients over HTTP, RESP2, SQL, or MongoDB wire &mdash; whichever fits your stack. Watch writes happen live via the <span class="mono">/events</span> SSE stream. MANIFEST gives O(1) warm starts; the deferred cold scan keeps the socket open immediately.</p>
-    </div>
-    <div class="code">
-      <div class="bar"><span class="d r"></span><span class="d y"></span><span class="d g"></span><span class="fn mono">shell</span></div>
-<pre class="mono"><span class="accent">$</span> nedbd                              <span class="c"># v1 AOF engine</span>
-<span class="accent">$</span> nedbd --dag                        <span class="c"># v2 DAG engine (nedbd-v2)</span>
-<span class="accent">$</span> NEDBD_DAG=<span class="n">1</span> nedbd                  <span class="c"># env-driven equivalent</span>
-<span class="accent">$</span> NEDBD_DAG=<span class="n">1</span> NEDB_TMK=<span class="s">&lt;hex&gt;</span> \
-    nedbd --data ./data               <span class="c"># DAG + AES-256-GCM</span>
-<span class="accent">$</span> NEDBD_RESP2_PORT=<span class="n">6380</span> nedbd       <span class="c"># also speaks redis-cli</span>
-
-<span class="c"># Create a database and query — same API on v1 and v2</span>
-<span class="accent">$</span> curl -X POST localhost:7070/v1/databases \
-    -d <span class="s">'{"name":"agents"}'</span>
-
-<span class="accent">$</span> curl -X POST localhost:7070/v1/databases/agents/query \
-    -d <span class="s">'{"nql":"FROM beliefs AS OF 200 VALID AS OF \"2024-06-15\" WHERE confidence > 0.8 TRACE caused_by"}'</span>
-
-<span class="c"># Real-time log stream (SSE) — new in v2.0.27</span>
-<span class="accent">$</span> curl http://127.0.0.1:7070/events
-<span class="c"># event: write</span>
-<span class="c"># data: {"seq":42,"coll":"beliefs","head":"b2:7af3…"}</span>
-
-<span class="c"># env: NEDBD_DAG · NEDBD_HOST (127.0.0.1) · NEDBD_PORT</span>
-<span class="c">#      NEDBD_DATA · NEDBD_TOKEN · NEDB_TMK (AES-256-GCM key)</span></pre>
+    <div class="eyebrow">Honesty</div>
+    <h2>The limits, stated rather than buried.</h2>
+    <p class="sub">An evaluator's first job is finding out what a product <b>won't</b> claim. Here is ours, in writing.</p>
+    <div class="honesty">
+      <ul>
+        <li><b style="color:var(--text)">Single-node by design, for now.</b> The engine is embedded or a single daemon. Replication is contract-level (tips, changefeeds, state roots) — there is no distributed consensus layer. Don't size it like CockroachDB.</li>
+        <li><b style="color:var(--text)">History costs disk.</b> Nothing is garbage-collected unless an operator explicitly runs compaction — which is deliberate, off by default, and announces that history will be pruned.</li>
+        <li><b style="color:var(--text)">SQL writes are append-only under the hood.</b> That's the feature. If you need destructive <code>TRUNCATE</code>, NEDB refuses it on purpose.</li>
+        <li><b style="color:var(--text)">Every benchmark is a dated snapshot.</b> Machine named, command shipped, ratios preferred over absolutes. None of these numbers are rounded up.</li>
+        <li><b style="color:var(--text)">Cast's model is small and honest about it.</b> 92.3% exact-plan match on eval, and its failure modes are published with examples — including the drift cases — not hidden behind a demo.</li>
+      </ul>
     </div>
   </div>
 </section>
 
-<section id="install">
+<section id="track-record">
   <div class="wrap">
-    <div class="kick">Install</div>
-    <h2>Two lines to a database</h2>
-    <div class="cta" style="margin-top:18px; flex-direction: column; align-items: flex-start;">
-      <code class="mono" style="background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:11px 16px"><span class="accent">$</span> pip install nedb-engine</code>
-      <code class="mono" style="background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:11px 16px"><span class="accent">$</span> npm install nedb-engine</code>
-      <code class="mono" style="background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:11px 16px"><span class="accent">$</span> NEDBD_DAG=1 NEDB_TMK=&lt;hex&gt; nedbd --data ./data</code>
+    <div class="eyebrow">Track record</div>
+    <h2>Three storage generations in 95 days, zero API breaks.</h2>
+    <p class="sub">Every entry below is a real tag in this repository's history — <span class="mono" style="color:var(--amber2)">git tag</span> is the audit. Same hash-chain API across all of it: stores migrate forward automatically, client code never rewrote.</p>
+
+    <div class="benchgrid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="stat"><div class="num">172</div><div class="lbl">versioned releases (git tags)</div></div>
+      <div class="stat"><div class="num">502</div><div class="lbl">commits on master</div></div>
+      <div class="stat"><div class="num">95</div><div class="lbl">days, first commit to v8.0.0</div></div>
+      <div class="stat"><div class="num">~13<small> h</small></div><div class="lbl">average release cadence</div></div>
     </div>
-    <p class="lede" style="margin-top:18px"><span class="mono">NEDB()</span> is in-memory; <span class="mono">NEDB("./path")</span> is durable. <span class="mono">nedbd</span> runs it as a server; <span class="mono">nedbd --dag</span> launches the v2 DAG engine. The Rust core ships as a native binary with a pure fallback. Set <span class="mono">NEDB_TMK</span> for AES-256-GCM at-rest encryption. Read the <a class="accent" href="https://github.com/Eth-Interchained/nedb/blob/master/docs/SPEC.md">format spec</a> or explore your data visually in <a class="accent" href="https://studio.interchained.org">NEDB Studio</a>.</p>
-    <div class="badges" style="margin-top: 20px;">
-      <a href="https://github.com/Eth-Interchained/nedb" target="_blank" rel="noopener noreferrer"><img alt="GitHub (source)" src="https://img.shields.io/badge/github-Eth--Interchained%2Fnedb-34d399?logo=github" /></a>
-      <a href="https://github.com/aiassistsecure/nedb" target="_blank" rel="noopener noreferrer"><img alt="GitHub (mirror)" src="https://img.shields.io/badge/github-aiassistsecure%2Fnedb-22d3ee?logo=github" /></a>
-      <a href="https://studio.interchained.org" target="_blank" rel="noopener noreferrer"><img alt="NEDB Studio" src="https://img.shields.io/badge/NEDB_Studio-studio.interchained.org-818cf8" /></a>
+
+    <div class="timeline">
+      <div class="tl"><div class="v">Jun 12, 2026 · v0.1.0</div><div class="t">Day one: the whole architecture</div><p>First commit ships the reference Python engine, the Rust core, and the tri-registry publish pipeline — together, on purpose.</p></div>
+      <div class="tl"><div class="v">Jun 14, 2026 · v0.9.0 → v1.0.0</div><div class="t">Provenance and bi-temporality in the first 72 hours</div><p>v0.9.0: Causal Write Provenance — the commit calls it "the first embedded database with sealed causal chains." v1.0.0, same day: bi-temporal <code>VALID AS OF</code>. Day 3 of the project.</p></div>
+      <div class="tl"><div class="v">Jun 15, 2026 · v1.1.0</div><div class="t">wrap_redis — NEDB as a Redis layer-2</div><p>Shadowing, backfill, isolation guarantee. The adapter family starts here.</p></div>
+      <div class="tl"><div class="v">Jun 16, 2026 · v2.0.x</div><div class="t">The v2 DAG engine</div><p>Content-addressed Merkle DAG replaces the AOF; <code>--dag</code> wired end-to-end within a day of the first alpha. Fourteen point releases in 24 hours.</p></div>
+      <div class="tl"><div class="v">Jun 22–27, 2026 · v2.2.31 → v2.4.468</div><div class="t">v3 segment store + tri-distribution discipline</div><p>Append-only packs, one fsync per batch, macOS fast-fsync. June 27: all three distributions aligned at one version on one tag — the pattern every release since has kept.</p></div>
+      <div class="tl"><div class="v">Jun 27, 2026 · v2.5.0</div><div class="t">The durability pass</div><p>Flush-on-exit, <code>nedb-cli</code>, the inspector, and the replication contract (tip / since / scan_status).</p></div>
+      <div class="tl"><div class="v">Jul 11, 2026 · v2.7.0</div><div class="t">Official Python client + daemon TTL</div><p><code>nedb.client.NedbClient</code> — the HTTP surface gets a first-class client with CAS transactions and Merkle proofs.</p></div>
+      <div class="tl"><div class="v">Jul 27, 2026 · v2.8.0 – v2.8.2</div><div class="t">Cast — the database understands English</div><p>A 3.33M-parameter model trained inside the engine's own parser, shipped in the engine. Drift detection follows in v2.8.2.</p></div>
+      <div class="tl"><div class="v">Sep 4–5, 2026 · v2.8.3 → v2.8.6</div><div class="t">The durability trilogy</div><p>Three defect classes found by killing a real engine at every persistence boundary — failed flushes, unobservable errors, a repair that couldn't repair.</p></div>
+      <div class="tl"><div class="v">Sep 8, 2026 · v3.0.0 → v3.2.2</div><div class="t">Five releases in one day</div><p>The MIT era closes, the wrap family lands in all three languages, embedded bindings learn to flush on a cadence. v3.0.0–3.3.1 stay MIT forever.</p></div>
+      <div class="tl"><div class="v">Sep 11, 2026 · v3.3.0 + v4.0.0</div><div class="t">The query language grows up; BUSL-1.1</div><p>Full boolean predicates in both engines, nine silent defects fixed, parity gated — then the relicensing: free under $1M revenue, Apache 2.0 at the Change Date.</p></div>
+      <div class="tl"><div class="v">Sep 12, 2026 · v4.2.0 → v4.3.1</div><div class="t">The pgwire compatibility day</div><p>Subqueries, set operations, LATERAL, the full psql <code>\d</code> matrix driven by the real binary — and the qualified-<code>WHERE</code> silent-zero-rows bug found and killed.</p></div>
+      <div class="tl"><div class="v">Sep 13, 2026 · v5.0.0 + v6.0.0</div><div class="t">State roots and the grammar land</div><p>Cross-engine state-root vectors pinned; NQL's verbs folded into the SQL evaluator; the published grammar rewritten to match the product. neSQL reaches master.</p></div>
+      <div class="tl"><div class="v">Sep 14, 2026 · v7.0.0</div><div class="t">The HTTP endpoint speaks neQL</div><p>One router for the daemon and the CLI — two front-ends can no longer disagree about what a statement means.</p></div>
+      <div class="tl"><div class="v">Sep 15, 2026 · v8.0.0</div><div class="t">One name, the equation</div><p>PostgreSQL's grammar + NEDB's clauses, the CLI that can actually publish, and the README rebuilt around provenance. Today.</p></div>
     </div>
   </div>
 </section>
 
 <footer>
-  <div class="wrap row">
-    <div>
-      <div class="brand" style="margin-bottom:7px"><span class="dot"></span> NEDB</div>
-      <div>v2.0.27 &middot; GPL-3.0-or-later &middot; &copy; <a href="https://interchained.org">INTERCHAINED, LLC</a> &middot; built with <a href="https://aiassist.net">AiAssist</a></div>
+  <div class="wrap">
+    <div class="cta">If a fact matters, put it somewhere that can prove itself.</div>
+    <p>NEDB — versioned, time-traveling, bi-temporal, causally-provable. Free in production under $1M revenue.</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/Eth-Interchained/nedb" target="_blank" rel="noopener noreferrer">Read the source →</a>
+      <a class="btn" href="https://studio.interchained.org" target="_blank" rel="noopener noreferrer">Try the Studio</a>
+      <a class="btn" href="https://pypi.org/project/nedb-engine/" target="_blank" rel="noopener noreferrer">PyPI</a>
+      <a class="btn" href="https://www.npmjs.com/package/nedb-engine" target="_blank" rel="noopener noreferrer">npm</a>
+      <a class="btn" href="https://crates.io/crates/nedb-engine" target="_blank" rel="noopener noreferrer">crates.io</a>
     </div>
-    <nav class="nav-links">
-      <a href="https://github.com/Eth-Interchained/nedb">GitHub</a>
-      <a href="https://pypi.org/project/nedb-engine/">PyPI</a>
-      <a href="https://www.npmjs.com/package/nedb-engine">npm</a>
-      <a href="https://studio.interchained.org">Studio</a>
-      <a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/SPEC.md">Spec</a>
-      <a href="https://interchained.org">interchained.org</a>
-    </nav>
+    <div class="credit">© 2026 INTERCHAINED LLC · nedb-engine v8.0.0 · every figure on this page dated and reproducible from the repo</div>
   </div>
+<section id="docs" style="border-bottom:none">
+  <div class="wrap">
+    <div class="eyebrow">Primary sources</div>
+    <h2>Go deeper — everything here is verifiable.</h2>
+    <p class="sub">This page summarizes the repository; the repository is the proof. These are the primary documents.</p>
+    <div class="pillars">
+      <div class="pillar"><div class="ic">📘</div><h3><a href="reference.html">API reference</a></h3><p>The full reference site: query language, clients, daemon routes.</p></div>
+      <div class="pillar"><div class="ic">📜</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/SPEC.md" target="_blank" rel="noopener noreferrer">docs/SPEC.md</a></h3><p>The formal spec — v2 object store, v3 substrate, the durability model.</p></div>
+      <div class="pillar"><div class="ic">🧾</div><h3><a href="https://github.com/Eth-Interchained/nedb#readme" target="_blank" rel="noopener noreferrer">README.md</a></h3><p>Every capability and every benchmark with its reproduce command.</p></div>
+    </div>
+    <div class="pillars" style="margin-top:16px">
+      <div class="pillar"><div class="ic">🔧</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/CLI.md" target="_blank" rel="noopener noreferrer">docs/CLI.md</a></h3><p>nedb-cli, nedb-inspector, nesql — operating a store offline.</p></div>
+      <div class="pillar"><div class="ic">🛡️</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/DURABILITY.md" target="_blank" rel="noopener noreferrer">docs/DURABILITY.md</a></h3><p>Flush contracts, crash boundaries, what a power cut actually costs.</p></div>
+      <div class="pillar"><div class="ic">📡</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/REPLICATION.md" target="_blank" rel="noopener noreferrer">docs/REPLICATION.md</a></h3><p>tip / since / scan_status — the replication contract.</p></div>
+    </div>
+  </div>
+</section>
+
 </footer>
 
 </body>
