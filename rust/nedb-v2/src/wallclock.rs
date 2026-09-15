@@ -322,8 +322,8 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
     // Howard Hinnant's days_from_civil algorithm.
     let y2 = if m <= 2 { y - 1 } else { y };
     let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
-    let yoe = (y2 - era * 400) as i64;
-    let mp = ((m as i64) + if m as i64 > 2 { -3 } else { 9 }) as i64;
+    let yoe: i64 = y2 - era * 400;
+    let mp: i64 = m as i64 + if m as i64 > 2 { -3 } else { 9 };
     let doy = (153 * mp + 2) / 5 + (d as i64) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     Some(era * 146_097 + doe - 719_468)
