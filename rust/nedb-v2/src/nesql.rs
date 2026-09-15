@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 // NEDB · © 2026 INTERCHAINED LLC × Eth-Interchained × Vex (Claude Opus 5)
 
-//! **neQL** — the whole language: NQL *and* PostgreSQL SQL.
+//! **neSQL** — the whole language: NQL *and* PostgreSQL SQL.
 //!
-//! Not a third dialect. neQL is the name for the pair, and this module is the
+//! Not a third dialect. neSQL is the name for the pair, and this module is the
 //! one place that decides which half a statement is written in.
 //!
 //! # Why the router lives in the engine
@@ -34,7 +34,7 @@
 //! parser seems likelier, because "seems likelier" is the guess the rule
 //! forbids.
 
-/// Which half of neQL a statement is written in.
+/// Which half of neSQL a statement is written in — inherited PostgreSQL, or NQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Nql,
@@ -78,13 +78,38 @@ pub fn route(q: &str) -> Result<Dialect, String> {
         return Ok(Dialect::Sql);
     }
     Err(format!(
-        "{:?} does not begin a statement in either half of neQL\n  \
-         NQL statements begin with: {}\n  \
-         SQL statements begin with: {}",
+        "{:?} does not begin a neSQL statement.\n\
+         neSQL is PostgreSQL's SQL plus NEDB's own clauses, so a statement starts\n\
+         in one of these two vocabularies:\n  \
+         NQL form begins with: {}\n  \
+         SQL form begins with: {}",
         head,
         NQL_HEADS.join(", "),
         SQL_HEADS.join(", "),
     ))
+}
+
+/// Run a neSQL statement, routing on the leading keyword.
+///
+/// The one place in the engine that turns "here is a statement" into rows
+/// regardless of which half it is written in. `POST /query`, `/subscribe` and
+/// the language bindings all come through here, so "NEDB speaks NQL and SQL"
+/// is one function rather than a property each caller has to remember to
+/// implement.
+///
+/// Returns the error TEXT rather than a typed error because every caller
+/// surfaces it to a client as a string, and a bespoke error enum here would be
+/// converted back to a string at each of them.
+pub fn run(db: &std::sync::Arc<crate::db::Db>, statement: &str)
+    -> Result<Vec<serde_json::Value>, String>
+{
+    match route(statement)? {
+        Dialect::Nql => crate::nql::query(db, statement)
+            .map(|(rows, _)| rows)
+            .map_err(|e| e.to_string()),
+        Dialect::Sql => crate::pgwire::execute_sql(db, statement, false)
+            .map(|done| done.rows),
+    }
 }
 
 #[cfg(test)]
@@ -94,7 +119,7 @@ mod tests {
     #[test]
     fn the_two_vocabularies_do_not_overlap() {
         // The whole no-guessing argument rests on this. If a word ever appears
-        // in both lists, routing becomes a coin flip and neQL starts lying
+        // in both lists, routing becomes a coin flip and neSQL starts lying
         // about being total.
         for n in NQL_HEADS {
             assert!(

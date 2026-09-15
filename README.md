@@ -5,7 +5,8 @@
 **Content-addressed Merkle DAG · Hash-chained · Time-traveling · Bi-temporal · Causally-provable embedded database.**
 
 Replay-protected · idempotent · relational · filterable · sortable · searchable · concurrent.
-One Rust core → ships to **PyPI** and **npm** from a single source.
+One Rust core → ships to **PyPI**, **npm** and **crates.io** from a single source,
+at the same version on the same tag.
 
 [![PyPI](https://img.shields.io/pypi/v/nedb-engine?label=PyPI&color=6366f1)](https://pypi.org/project/nedb-engine/)
 [![crates.io](https://img.shields.io/crates/v/nedb-engine?label=crates.io&color=f97316)](https://crates.io/crates/nedb-engine)
@@ -40,15 +41,31 @@ NEDB's PostgreSQL endpoint answers `psql`, SQLAlchemy Core **and** ORM, asyncpg 
 node-postgres against a live store. It used to get there by *translating* SQL into
 NQL, and a translation can only reach as far as the target language's shape.
 
-**neSQL is the name for what replaced that.** PostgreSQL's real grammar (`gram.y`,
-19,513 lines, 492 keywords, vendored from 17.4 at
-[`vendor/postgresql/`](vendor/postgresql/) with its licence intact), extended with
-NEDB's temporal and causal clauses. **Two front-ends, one plan. NQL folded in, not
-deleted.**
+**neSQL is the name for what replaced that**, and it is exactly as much of an
+addition as it sounds like:
 
-**neQL** is the name for the pair — NQL *and* PostgreSQL SQL, one language with two
-halves. Which half a statement is read as is decided **structurally**, not guessed:
-NQL statements begin `FROM`, and PostgreSQL has no statement form that begins with
+```
+neSQL  =  PostgreSQL SQL        ·  inherited whole, not reimplemented
+       +  NEDB SQL              ·  what a permanent, hash-chained store can answer
+```
+
+**We inherit, then we gain.** The left-hand side is PostgreSQL's real grammar —
+`gram.y`, 19,513 lines and 492 keywords, vendored from 17.4 at
+[`vendor/postgresql/`](vendor/postgresql/) with its licence intact. Not a subset,
+not a lookalike: the definition every other tool in the world was built against.
+If it is valid PostgreSQL and the evaluator can parse it, it runs.
+
+The right-hand side is what NEDB adds because it can — `AS OF SYSTEM TIME`,
+`VALID AS OF`, `SEARCH`, `TRACE`, `TRAVERSE`. These are clauses PostgreSQL has no
+spelling for, because a store that overwrites has nothing to point them at. They
+are additions **to** the vendored grammar, never deviations **from** it.
+
+So neSQL is not a dialect of SQL that you have to learn around. It is PostgreSQL
+plus the questions a database with permanent memory can be asked. Anything you
+already write keeps working; the new clauses are there when you need them.
+
+Which half a statement is read as is decided **structurally**, never guessed:
+NQL's own form begins `FROM`, PostgreSQL has no statement form that begins with
 `FROM`, so the leading keyword partitions the two vocabularies rather than hinting
 at them. A first word in neither is refused *naming both*.
 
@@ -67,7 +84,7 @@ published. The engine you actually install is `nedb-engine`. The
 [neSQL repository](https://github.com/Eth-Interchained/neSQL) holds the language —
 both halves of the grammar and the CLI's source, side by side.
 
-### `nesql` — the CLI, and it speaks neQL
+### `nesql` — the CLI, and it speaks neSQL
 
 Ships in this release, no flag. `nesql` opens a store directly — no daemon, no
 port — and answers both halves of the language through **one** `query` command:
@@ -202,7 +219,7 @@ the bar for changing that written down.
 
 ---
 
-## New in 3.3.0 — the query language grew up
+## The query language grew up  ·  *landed in 3.3.0*
 
 `WHERE` was six operators wide (`= != > < >= <=`) joined by an implicit `AND`.
 It now takes a full boolean expression, in **both** engines, and the clauses
@@ -348,11 +365,21 @@ Provenance is selectable like any other column:
 SELECT _id, _hash, _seq FROM audit ORDER BY _seq;
 ```
 
-**This is not "NEDB speaks SQL", and the endpoint is careful to say so.** It is
-a documented subset of `SELECT` **translated** to NQL — and that word is doing
-all the work in this sentence. Every refusal below traces to the same cause:
-NQL is the engine's native language, so SQL has to be rewritten into it, and a
-rewrite can only ever reach as far as the target language's shape.
+**NEDB speaks SQL. That sentence used to carry a caveat, and no longer does.**
+
+For most of this project's life it was true that the endpoint served a
+documented *subset* of `SELECT` **translated** into NQL — and every refusal in
+the table below traced to that one cause: a rewrite can only reach as far as the
+target language's shape, and NQL's shape is single-collection with no projection.
+
+That translator no longer answers `SELECT`. The evaluator does, for every
+statement it can parse, with nothing to enable. It is kept for writes and for
+anything outside the `SELECT` grammar, which is why a statement it cannot parse
+still gets an answer rather than an error.
+
+The table is preserved below as history, because the distinction between "the
+engine could never do this" and "the translator could not reach it" is the whole
+story of how neSQL happened — and only one of those was ever true.
 
 | Expressible in NQL | Not expressible there, and why | the evaluator |
 | --- | --- | --- |
@@ -372,7 +399,7 @@ NEDB is append-only *so that history cannot be discarded* — that is the produc
 not a gap — and DDL is refused because collections are created by the first write
 to them. Those answers do not change.
 
-### Every other row on that table was a translation artefact — and one flag removes them
+### Every other row on that table was a translation artefact — and they are gone
 
 > ### 🆕 [**neSQL**](https://github.com/Eth-Interchained/neSQL) — PostgreSQL's grammar, NEDB's memory
 >
@@ -521,7 +548,7 @@ SQL `UPDATE`, the prior value is still readable at its original sequence.
 
 ---
 
-## New in 3.2.0 — wrap the databases you already run
+## Wrap the databases you already run  ·  *landed in 3.2.0*
 
 NEDB adds **tamper-evident causal provenance to a database you already have**, in one line, without
 rip-and-replace. Five adapters, one surface:
@@ -616,7 +643,7 @@ permissive, and the two Python runtime dependencies are BSD and Apache.
 **Versions 3.0.0 – 3.3.1 stay MIT, irrevocably.** If you already have NEDB at 3.3.1 or earlier, your
 rights in that copy are untouched. This applies to 4.0.0 and later only.
 
-### Also in 3.2.0
+### Also landed in 3.2.0
 
 - **A durability defect that pinned every embedded database.** The background flush ticker held a
   strong `Arc<Db>` in an unconditional loop, so the handle was never dropped: the exclusive data-dir
@@ -636,7 +663,7 @@ rights in that copy are untouched. This applies to 4.0.0 and later only.
 
 ---
 
-## Earlier — 2.8.6 durability & recovery
+## Durability & recovery  ·  *landed in 2.8.6*
 
 Three defects found by killing a real engine at every persistence boundary and by filling a real
 filesystem to zero free blocks. **If you are on 2.8.5 or earlier, upgrade.**
@@ -681,11 +708,11 @@ value. Ten writes drain as nine records. Changing the convention would break exi
 
 ---
 
-## NEDB v3.2.0 — Production Stable
+## Distribution — three aligned distributions, one tag
 
-**Current stable: 3.2.0** — NEDB ships as **three version-aligned distributions** on one tag — `nedb-engine` (flagship), `crypto-database` (verifiable v2/v3 DAG), and `aof-db` (fast append-only) — across npm / PyPI / crates.io with native addons for **macOS (arm64 + x86_64), Linux (x86_64 + aarch64, glibc + musl) and Windows x86_64** (see [**Releasing**](#releasing) below). All native wheels (Linux + Windows on GitHub Actions; macOS on Codemagic M2 Mac Minis) **plus** the universal pure-Python wheel ship from a single `v*` tag, with the `nedbd-v2` binary bundled inside `pip install nedb-engine`.
+NEDB ships as **three version-aligned distributions** on one tag — `nedb-engine` (flagship), `crypto-database` (verifiable v2/v3 DAG), and `aof-db` (fast append-only) — across npm / PyPI / crates.io with native addons for **macOS (arm64 + x86_64), Linux (x86_64 + aarch64, glibc + musl) and Windows x86_64** (see [**Releasing**](#releasing) below). All native wheels (Linux + Windows on GitHub Actions; macOS on Codemagic M2 Mac Minis) **plus** the universal pure-Python wheel ship from a single `v*` tag, with the `nedbd-v2` binary bundled inside `pip install nedb-engine`.
 
-### New in 2.8.0 — Cast: the database understands English
+### Cast — the database understands English  ·  *landed in 2.8.0*
 
 `POST /v1/databases/<name>/cast` turns a short English prompt into NQL, using a **3.33M-parameter model that runs locally on CPU**. No API key, no network call, no per-token bill.
 
@@ -728,9 +755,9 @@ nedbd --dag --data ./data
 NEDBD_DAG=1 NEDB_TMK=<32-byte-hex> nedbd --data ./data
 
 curl http://127.0.0.1:7070/health
-# {"ok":true,"version":"3.2.0","service":"nedbd","engine":"dag","startup_ready":true,"encrypted":true}
+# {"ok":true,"version":"7.2.0","service":"nedbd","engine":"dag","startup_ready":true,"encrypted":true}
 
-# Tail the live event stream (new in v2.2.31)
+# Tail the live event stream (since 2.2.31)
 curl http://127.0.0.1:7070/events
 # event: scan   data: {"objects":730000,"of":1310703,"rate":21043,"eta_s":28}
 # event: ready  data: {"seq":1310703,"head":"b2:9c14e07a…"}
@@ -754,7 +781,9 @@ curl http://127.0.0.1:7070/events
 
 **v1 AOF engine is still shipped and unchanged** — `nedbd` (no flag) runs v1.
 
-**Production status:** [vision.interchained.org](https://vision.interchained.org) is live on v2.2.31 — **1,310,703 sequences** indexed in the Vision database, AES-256-GCM encrypted at rest, at block height **620,989**.
+**Production status:** [vision.interchained.org](https://vision.interchained.org) is live — verified reachable 15 Sep 2026.
+
+The deployment figures below are a **dated snapshot**, not a live readout: **1,310,703 sequences** indexed, AES-256-GCM encrypted at rest, block height **620,989**, measured on engine **v2.2.31**. The engine version a deployment runs is not exposed on its public surface, so treat the version here as the one those numbers were taken on rather than as what is running today.
 
 ---
 
@@ -987,7 +1016,7 @@ nedbd --dag --data ./data                 # v2 DAG engine (or NEDBD_DAG=1)
 NEDBD_RESP2_PORT=6380 nedbd               # also speak RESP2 (redis-cli compatible)
 nedbd --log-level 2                       # 0=errors 1=requests 2=deploy 3=verbose
 
-# Live event stream (new in v2.2.31) — SSE: scan progress, ready, per-write head
+# Live event stream (since 2.2.31) — SSE: scan progress, ready, per-write head
 curl http://127.0.0.1:7070/events
 ```
 
@@ -995,7 +1024,7 @@ curl http://127.0.0.1:7070/events
 
 Alongside the daemon, `cargo install nedb-engine` ships **`nedb-cli`** — operate on a store directory offline (`head`/`status`/`verify`/`get`/`scan`/`flush`/`repair`/`export`) — and **`nedb-inspector`**, a deterministic checker that warns when a durable open lacks flush-on-exit wiring. Full reference: [**docs/CLI.md**](docs/CLI.md).
 
-### Startup modes (v2.2.31)
+### Startup modes
 
 - **Warm start** — every restart after the first open reads the `MANIFEST` file and restores `seq` + Merkle `head` in **O(1)**. No scan, no replay, independent of dataset size. Boots in milliseconds.
 - **Cold start** — first open of an existing dataset spawns the integrity scan in a background thread *and accepts connections immediately*. Reads serve instantly from the content-addressed DAG; writes return `HTTP 503 startup in progress` until the `startup_ready` gate flips. Progress (objects, rate, ETA) streams over `GET /events`.
@@ -1023,7 +1052,7 @@ curl -X POST :7070/v1/databases -d '{
     "links": [["users:u1","buys","orders:o1"]]
   }}'
 
-# Query — the endpoint speaks neQL: SQL *or* NQL, routed on the first keyword
+# Query — the endpoint speaks neSQL: SQL *or* NQL, routed on the first keyword
 curl -X POST :7070/v1/databases/shop/query \
   -d '{"nql":"SELECT name FROM users WHERE status = '"'"'active'"'"' ORDER BY name"}'
 # → {"rows":[{"name":"Alice"}],"count":1,"dialect":"sql", ...}
@@ -1034,7 +1063,7 @@ curl -X POST :7070/v1/databases/shop/query \
 
 
 **The field is still called `nql`, and its contents no longer have to be.** This
-endpoint accepts **neQL** — NQL *or* PostgreSQL SQL — and answers with the
+endpoint accepts **neSQL** — NQL *or* PostgreSQL SQL — and answers with the
 `dialect` it chose. The name is unchanged because every existing HTTP client
 sends it; renaming would break them to gain nothing. Old NQL clients are
 unaffected.
@@ -1046,7 +1075,7 @@ refused *naming both* — never handed to whichever parser seems likelier.
 
 ```bash
 curl -X POST :7070/v1/databases/shop/query -d '{"nql":"GRANT ALL ON users"}'
-# → 400  "GRANT" does not begin a statement in either half of neQL
+# → 400  "GRANT" does not begin a statement in either half of neSQL
 #          NQL statements begin with: FROM
 #          SQL statements begin with: SELECT, INSERT, UPDATE, ...
 ```
