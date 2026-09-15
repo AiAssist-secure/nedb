@@ -174,6 +174,13 @@ pub struct Db {
     /// and the cold-scan background pass. Only covers nodes from the current
     /// process session + cold-scan; older seqs not in this map cannot be resolved.
     seq_index:          Arc<DashMap<u64, String>>,
+    /// Write-time → seq, sorted ascending, for wall-clock `AS OF SYSTEM TIME`
+    /// resolution. Populated alongside `seq_index` (same put/cold-scan paths),
+    /// so it carries the same session-scoped coverage and the same
+    /// `seq_index_ready` gate. A `Vec` of `(ts, seq)` pairs rather than a map:
+    /// the ONLY query it answers is "last seq at or before T", which is one
+    /// binary search over a sorted array — a map would need a full key scan.
+    ts_index:           Arc<std::sync::RwLock<Vec<(f64, u64)>>>,
     /// Collections already known to be registered, so the common case — every
     /// write after a collection's first — costs one lock-free map hit instead of
     /// an index lookup.
@@ -205,6 +212,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(true)),  // always ready
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            ts_index:       Arc::new(std::sync::RwLock::new(Vec::new())),
             known_collections: Arc::new(DashMap::new()),
         }
     }
@@ -271,6 +279,7 @@ impl Db {
             startup_ready:  Arc::new(AtomicBool::new(false)),
             manifest_dirty: Arc::new(AtomicBool::new(false)),
             seq_index:      Arc::new(DashMap::new()),
+            ts_index:       Arc::new(std::sync::RwLock::new(Vec::new())),
             known_collections: Arc::new(DashMap::new()),
         };
 
@@ -402,6 +411,17 @@ impl Db {
         }
         let written = rebuild_id_index_from_nodes(self, &nodes);
 
+        // The wall-clock index rides the same repair: it is derivable from
+        // the same objects, and a store repaired for `since()` should answer
+        // wall-clock `AS OF` too — not half of its history contract.
+        {
+            let mut pairs: Vec<(f64, u64)> = nodes.iter().map(|n| (n.ts, n.seq)).collect();
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+            if let Ok(mut idx) = self.ts_index.write() {
+                *idx = pairs;
+            }
+        }
+
         // Per-collection tips, so tip_collection() resolves after a repair.
         let mut coll_max: std::collections::HashMap<String, (u64, String)> =
             std::collections::HashMap::new();
@@ -522,6 +542,7 @@ impl Db {
         // Write to object store (atomic, content-addressed)
         let hash = self.objects.write(&mut node)?;
         self.seq_index.insert(seq, hash.clone());
+        self.ts_index_push(node.ts, seq);
 
         // Update id index (atomic file)
         self.id_index.set(coll, id, &hash)?;
@@ -1614,6 +1635,75 @@ impl Db {
         self.seq_index.get(&seq).map(|r| r.clone())
     }
 
+    // ── wall-clock AS OF resolution ────────────────────────────────────────
+    //
+    // `AS OF SYSTEM TIME <ts>` (a datetime, not a bare integer) asks "state as
+    // known at wall-clock moment T". The log is seq-ordered and ts is monotonic
+    // (single-writer sequencer — every put stamps its own `now()`), so the
+    // answer is one binary search: the last seq whose write-time is <= T.
+    //
+    // The index carries the SAME coverage as `seq_index` — this session's
+    // writes + whatever the cold scan has indexed so far — and is gated by the
+    // SAME `seq_index_ready` flag. On a warm boot (scan skipped) a wall-clock
+    // moment that resolves into un-indexed history reports "could not
+    // determine" rather than guessing; that is the same honesty `since()` was
+    // taught, and the fix is the same: rebuild/repair to index history.
+
+    /// Append one (ts, seq) pair to the wall-clock index. Called from the put
+    /// paths; appends only, because the sequencer's timestamps are monotonic.
+    /// A caller-supplied out-of-order ts (never produced by the engine) would
+    /// corrupt the sort — so the push asserts monotonicity and falls back to a
+    /// full re-sort, the cheap path being the common one.
+    fn ts_index_push(&self, ts: f64, seq: u64) {
+        if let Ok(mut idx) = self.ts_index.write() {
+            if idx.last().map(|(last_ts, _)| ts >= *last_ts).unwrap_or(true) {
+                idx.push((ts, seq));
+            } else {
+                idx.push((ts, seq));
+                idx.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+            }
+        }
+    }
+
+    /// The newest seq whose write-time is at or before `ts` — the seq a
+    /// wall-clock `AS OF SYSTEM TIME '<datetime>'` resolves to.
+    ///
+    /// `None` = "could not determine": either nothing was written at or before
+    /// `ts` within indexed history (ts before the store's first write), or the
+    /// relevant history is not indexed on this boot. Callers report these
+    /// distinctly: `ts_index_ready()` false means repair/rebuild can help;
+    /// true with `None` means the moment genuinely precedes indexed history.
+    /// (After compaction, a pruned moment is "history no longer available" —
+    /// the floor check the caller does against `history_floor()`.)
+    pub fn seq_at(&self, ts: f64) -> Option<u64> {
+        let idx = self.ts_index.read().ok()?;
+        if idx.is_empty() {
+            return None;
+        }
+        // Binary search: rightmost entry with entry.ts <= ts.
+        let mut lo = 0usize;
+        let mut hi = idx.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if idx[mid].0 <= ts {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo == 0 {
+            return None; // every indexed write happened after ts
+        }
+        Some(idx[lo - 1].1)
+    }
+
+    /// Whether the wall-clock index covers the store's history (same gate as
+    /// the seq index: true once the cold scan has indexed, or nothing needs
+    /// indexing). `false` + a failed `seq_at` = "not indexed on this boot".
+    pub fn ts_index_ready(&self) -> bool {
+        self.scan_status().seq_index_ready
+    }
+
     /// The tip — the most recently written node (highest seq), or `None` if the
     /// database is empty. O(1): `self.seq` is the next-to-assign counter, so the
     /// latest write sits at `seq - 1`; we resolve it through the same
@@ -1802,6 +1892,10 @@ fn cold_scan_background_arc(db: Arc<Db>) {
     let sorted_indexes = &db.sorted_indexes;
     let seq_index      = &db.seq_index;
     let ready_flag     = Arc::clone(&db.startup_ready);
+    // (ts, seq) pairs gathered by the parallel readers, merged into `ts_index`
+    // once — sorted + deduped — after the collect. Rayon workers push to their
+    // own vectors; the index itself is built in one pass below.
+    let ts_pairs: std::sync::Mutex<Vec<(f64, u64)>> = std::sync::Mutex::new(Vec::new());
 
     let hashes: Vec<String> = objects.all_hashes().collect();
     let total = hashes.len();
@@ -1837,6 +1931,7 @@ fn cold_scan_background_arc(db: Arc<Db>) {
             }
             let node = objects.read(h).ok()?;
             seq_index.insert(node.seq, node.hash.clone());
+            if let Ok(mut tp) = ts_pairs.lock() { tp.push((node.ts, node.seq)); }
             Some(node)
         })
         .collect();
@@ -1846,6 +1941,14 @@ fn cold_scan_background_arc(db: Arc<Db>) {
 
     let max_seq = nodes.iter().map(|n| n.seq).max().unwrap_or(0);
     seq_atomic.store(max_seq + 1, Ordering::SeqCst);
+
+    // Merge the gathered (ts, seq) pairs into the sorted wall-clock index.
+    if let Ok(mut tp) = ts_pairs.lock() {
+        let mut pairs = std::mem::take(&mut *tp);
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        pairs.dedup_by(|a, b| a.1 == b.1 && a.0 == b.0);
+        if let Ok(mut idx) = db.ts_index.write() { *idx = pairs; }
+    }
 
     // Per-collection tip: highest-seq node's hash, per coll. `nodes` is NOT
     // seq-ordered here (it comes from an unordered object-hash scan), so this
@@ -2029,6 +2132,111 @@ mod tests {
         assert_eq!(at_v1.data["v"], 1);
         let current = db.get("docs", "x").unwrap();
         assert_eq!(current.data["v"], 2);
+    }
+
+    #[test]
+    fn wall_clock_as_of_resolves_through_seq_at() {
+        // The full chain a datetime AS OF rides: put stamps its ts, the ts
+        // index holds it, seq_at binary-searches back to the right write.
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+
+        let v1 = db.put("docs", "x", serde_json::json!({"v": 1}), vec![], None, None).unwrap();
+        let v2 = db.put("docs", "x", serde_json::json!({"v": 2}), vec![], None, None).unwrap();
+        let v3 = db.put("docs", "x", serde_json::json!({"v": 3}), vec![], None, None).unwrap();
+
+        // Ground truth: each node's own ts resolves to ITSELF (the boundary
+        // case — "at or before" includes the write that happened exactly then).
+        assert_eq!(db.seq_at(v1.ts), Some(v1.seq));
+        assert_eq!(db.seq_at(v2.ts), Some(v2.seq));
+        assert_eq!(db.seq_at(v3.ts), Some(v3.seq));
+
+        // One microsecond BEFORE v2's ts resolves to v1 — "state as known at
+        // that moment", not "state as of the next write".
+        assert_eq!(db.seq_at(v2.ts - 0.000001), Some(v1.seq));
+        assert_eq!(db.seq_at(v3.ts - 0.000001), Some(v2.seq));
+
+        // Between writes: still the last write at or before.
+        assert_eq!(db.seq_at((v1.ts + v2.ts) / 2.0), Some(v1.seq));
+
+        // Before the store existed: could-not-determine, not a guess.
+        assert_eq!(db.seq_at(0.0), None);
+        // Long after: clamps to the newest write (the tip's seq).
+        assert_eq!(db.seq_at(9_999_999_999.0), Some(v3.seq));
+    }
+
+    #[test]
+    fn ts_index_survives_reopen_via_cold_scan() {
+        // Warm starts skip the scan and the index comes back empty — the
+        // SAME session-scoped coverage seq_index has, gated by the same
+        // flag. A cold start (fresh open of the same dir in a new Db) fills
+        // it back. This is the reopen half of the contract.
+        let dir = tempdir().unwrap();
+        let ts_to_seq;
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            let v1 = db.put("docs", "x", serde_json::json!({"v": 1}), vec![], None, None).unwrap();
+            ts_to_seq = (v1.ts, v1.seq);
+            db.flush_all();
+        }
+        {
+            let db = Db::open(dir.path(), None).unwrap();
+            // A reopen of a healthy store is a WARM boot — the scan is skipped
+            // by design and the wall-clock index is empty with it. The
+            // contract: not-ready gate + could-not-determine, never a guess.
+            // (A deployment that needs wall-clock AS OF after warm boots runs
+            // `nedb-cli repair`, exactly as it would for `since()`.)
+            if !db.ts_index_ready() {
+                assert_eq!(db.seq_at(ts_to_seq.0), None,
+                    "an unindexed moment must answer could-not-determine, never guess");
+            }
+            // The forced cold path fills it: explicit repair semantics.
+            let restored = db.rebuild_id_index().expect("rebuild runs");
+            assert!(restored >= 1);
+            let got = db.seq_at(ts_to_seq.0);
+            assert_eq!(got, Some(ts_to_seq.1), "after the rebuild, the moment resolves");
+            // And it resolves to the WRITE, not to one-after: the boundary.
+            let node = db.get_as_of("docs", "x", got.unwrap()).unwrap();
+            assert_eq!(node.data["v"], 1);
+        }
+    }
+
+    #[test]
+    fn monotonic_put_keeps_the_index_sorted_without_resorting() {
+        // The common path: every put appends a strictly-later ts. The index
+        // must stay sorted by construction — a binary search over an
+        // unsorted array answers randomly, which is worse than answering
+        // nothing.
+        let dir = tempdir().unwrap();
+        let db = Db::open(dir.path(), None).unwrap();
+        let mut last_ts = 0.0f64;
+        for i in 0..50 {
+            let n = db.put("docs", &format!("id-{}", i), serde_json::json!({"i": i}), vec![], None, None).unwrap();
+            assert!(n.ts >= last_ts, "the sequencer stamps monotonically");
+            last_ts = n.ts;
+        }
+        // Every write resolves to ITSELF — only true if the index is sorted
+        // with seq tie-breaks (rapid puts share one clock tick; a binary
+        // search over unsorted equal-ts runs answers arbitrarily).
+        for seq in 1..=50u64 {
+            let n = db
+                .get_hash_by_seq(seq)
+                .and_then(|h| db.objects.read(&h).ok())
+                .unwrap_or_else(|| panic!("seq {} must resolve", seq));
+            if seq <= 12 {
+                if let Ok(idx) = db.ts_index.read() {
+                    eprintln!("DBG seq {} ts {} idx[seq]={:?} idx_len {}",
+                        seq, n.ts, idx.get(seq as usize), idx.len());
+                }
+            }
+            assert_eq!(
+                db.seq_at(n.ts),
+                Some(n.seq),
+                "write at seq {} (ts {}) must resolve to itself",
+                n.seq,
+                n.ts
+            );
+        }
     }
 }
 

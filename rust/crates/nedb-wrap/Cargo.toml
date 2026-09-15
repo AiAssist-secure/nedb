@@ -12,7 +12,7 @@ readme      = "README.md"
 
 [dependencies]
 nedb-engine = { path = "../../nedb-v2", version = "8.0.0" }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 anyhow = "1"
 # Optional host-protocol clients — each adapter ships behind a feature flag
 # so the default build pulls nothing but the engine itself.

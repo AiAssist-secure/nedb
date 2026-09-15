@@ -100,7 +100,7 @@ def _lex(text: str) -> List[Tuple[str, Any, str]]:
 
 
 def empty_plan(coll: str) -> dict:
-    return {"from": coll, "as_of": None, "where": [], "search": None,
+    return {"from": coll, "as_of": None, "as_of_is_datetime": False, "where": [], "search": None,
             "order_by": None, "order_keys": None,
             "traverse": None, "limit": None, "offset": None,
             "group_by": None, "aggregate": None, "having": None,
@@ -374,15 +374,25 @@ def parse_nql(text: str) -> dict:
     i += 1
     plan = empty_plan(coll_raw)
 
-    # AS OF <seq>
+    # AS OF <seq | "datetime">
+    # A bare integer is a NEDB sequence — the original contract, unchanged.
+    # A quoted string is a wall-clock moment (ISO datetime/date, or unix with
+    # an explicit s/ms unit): the engine resolves it to the last seq whose
+    # write-time is at or before it. Both engines share the rule so they
+    # cannot disagree about what a query means.
     if peek() == ("kw", "as"):
         i += 1
         expect_kw("of")
         t, v = peek()
-        if t != "num":
-            raise SyntaxError("NQL: AS OF expects an integer seq")
-        i += 1
-        plan["as_of"] = int(v)
+        if t == "num":
+            i += 1
+            plan["as_of"] = int(v)
+        elif t == "str":
+            i += 1
+            plan["as_of"] = v          # raw literal; resolved by the executor
+            plan["as_of_is_datetime"] = True
+        else:
+            raise SyntaxError("NQL: AS OF expects an integer seq or a quoted datetime")
 
     # VALID AS OF <date>  — bi-temporal valid-time filter
     # Syntax: VALID AS OF "2024-02-15"  (ISO 8601 date or datetime string)
