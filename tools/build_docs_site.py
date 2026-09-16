@@ -341,10 +341,12 @@ usage, <code>3</code> <b>could not determine</b> (pruned history — a pruned st
 corrupt one), <code>4</code> not found, <code>5</code> unsupported. <code>root verify</code>
 reports the stored record and the recomputation as two independent facts, never collapsed.</p>
 
-<p>The <code>nesql</code> name is reserved on PyPI, crates.io and npm as 0.0.1 placeholders —
-each loads and answers <code>is_release() == false</code>, because a package that imports
-cleanly and then lies is worse than one that is not published. The engine you install is
-<code>nedb-engine</code>, which already ships the CLI as a console script.</p>
+<p>The packages are real and version-aligned with the engine: the crates.io crate
+<code>nesql</code> is the CLI itself (<code>cargo add nesql</code>, building against the registry
+engine); PyPI <code>nesql</code> and npm <code>nesql-engine</code> carry the language reference. And the
+same CLI binary is staged into every platform build of <code>nedb-engine</code> — one install
+carries everything. The <a href="https://github.com/Eth-Interchained/neSQL">neSQL repository</a>
+is the language's home: vendored grammar, CLI source, NQL reference, NEDB specs.</p>
 """
 
 BODIES["nql"] = """
@@ -503,10 +505,12 @@ one, and an operator who cannot tell those apart will ignore a real alarm or pan
 one), <code>4</code> not found, <code>5</code> unsupported. <code>root verify</code> reports the
 stored record and the recomputation as two independent facts, never collapsed.</p>
 
-<p>The <code>nesql</code> name is reserved on PyPI, crates.io and npm as 0.0.1 placeholders —
-each loads and answers <code>is_release() == false</code>, because a package that imports
-cleanly and then lies is worse than one that is not published. The engine you install is
-<code>nedb-engine</code>, which already ships the CLI as a console script.</p>
+<p>The packages are real and version-aligned with the engine: the crates.io crate
+<code>nesql</code> is the CLI itself (<code>cargo add nesql</code>, building against the registry
+engine); PyPI <code>nesql</code> and npm <code>nesql-engine</code> carry the language reference. And the
+same CLI binary is staged into every platform build of <code>nedb-engine</code> — one install
+carries everything. The <a href="https://github.com/Eth-Interchained/neSQL">neSQL repository</a>
+is the language's home: vendored grammar, CLI source, NQL reference, NEDB specs.</p>
 """
 
 BODIES["protocols"] = """
@@ -965,8 +969,9 @@ and publish on <code>v*</code>; macOS addons build on Codemagic M2 runners.</p>
 <tr><td>append-only</td><td><code>aof-db</code></td><td><code>aof-db</code></td><td><code>aof-db</code></td></tr>
 </table>
 
-<p><code>nesql</code> (PyPI/crates) and <code>nesql-engine</code> (npm) are reserved 0.0.1
-placeholders that answer <code>is_release() == false</code> — names held, not products.</p>
+<p>The neSQL packages (<code>nesql</code> on PyPI/crates, <code>nesql-engine</code> on npm) are
+version-aligned with the engine; the crates.io crate is the working CLI. See
+<a href="https://github.com/Eth-Interchained/neSQL">Eth-Interchained/neSQL</a>.</p>
 """
 
 # ── rendering ────────────────────────────────────────────────────────────────

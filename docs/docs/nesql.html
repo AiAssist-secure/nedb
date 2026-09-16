@@ -154,10 +154,12 @@ one, and an operator who cannot tell those apart will ignore a real alarm or pan
 one), <code>4</code> not found, <code>5</code> unsupported. <code>root verify</code> reports the
 stored record and the recomputation as two independent facts, never collapsed.</p>
 
-<p>The <code>nesql</code> name is reserved on PyPI, crates.io and npm as 0.0.1 placeholders —
-each loads and answers <code>is_release() == false</code>, because a package that imports
-cleanly and then lies is worse than one that is not published. The engine you install is
-<code>nedb-engine</code>, which already ships the CLI as a console script.</p>
+<p>The packages are real and version-aligned with the engine: the crates.io crate
+<code>nesql</code> is the CLI itself (<code>cargo add nesql</code>, building against the registry
+engine); PyPI <code>nesql</code> and npm <code>nesql-engine</code> carry the language reference. And the
+same CLI binary is staged into every platform build of <code>nedb-engine</code> — one install
+carries everything. The <a href="https://github.com/Eth-Interchained/neSQL">neSQL repository</a>
+is the language's home: vendored grammar, CLI source, NQL reference, NEDB specs.</p>
 
   <div class="editlink">Found something wrong or missing? <a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — these pages are generated from <code>tools/build_docs_site.py</code>.</div>
   <div class="pager"><a class="prev" href="provenance.html"><small>← Previous</small>Provenance &amp; Time</a><a class="next" href="nql.html"><small>Next →</small>The FROM-form in Depth</a></div>
