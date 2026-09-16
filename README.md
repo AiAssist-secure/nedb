@@ -171,18 +171,25 @@ evaluator with no flag to set, the `nesql` CLI likewise.
 [![neSQL on crates.io](https://img.shields.io/crates/v/nesql?label=nesql%20·%20crates.io&color=a855f7)](https://crates.io/crates/nesql)
 [![neSQL on npm](https://img.shields.io/npm/v/nesql-engine?label=nesql-engine%20·%20npm&color=a855f7)](https://www.npmjs.com/package/nesql-engine)
 
-Those three badges read **0.0.1** next to an engine at 8.0.0, and that is
-deliberate rather than neglected. They are **reserved names**: each package loads,
-reports the vendored PostgreSQL release, and answers `is_release() == false`,
-because a package that imports cleanly and then lies is worse than one that is not
-published. The engine you actually install is `nedb-engine`. The
-[neSQL repository](https://github.com/Eth-Interchained/neSQL) holds the language —
-both halves of the grammar and the CLI's source, side by side.
+The three neSQL packages are **real and version-aligned with the engine** — the
+badges above are live registry state, not placeholders. They split by delivery
+path, not by function:
+
+| package | registry | what it is |
+|---|---|---|
+| [`nesql`](https://crates.io/crates/nesql) | crates.io | **the real CLI crate** — `cargo add nesql`, builds against the registry engine |
+| [`nesql`](https://pypi.org/project/nesql/) | PyPI | the language reference (vendored-grammar facts, clause extensions) |
+| [`nesql-engine`](https://www.npmjs.com/package/nesql-engine) | npm | the language reference |
+
+The [neSQL repository](https://github.com/Eth-Interchained/neSQL) is the language's
+home: the vendored PostgreSQL grammar with its licence intact, the CLI crate source,
+the NQL grammar reference, and the NEDB specs. And because the CLI is also staged
+into every platform build of the engine (below), **one install carries everything**:
 
 ### `nesql` — the CLI, and it speaks neSQL
 
-Ships inside `pip install nedb-engine` — no daemon, no port — and answers both
-halves of the language through **one** `query` command:
+Ships inside `pip install nedb-engine` — no daemon, no port, the compiled binary on
+your PATH — and answers both halves of the language through **one** `query` command:
 
 ```console
 $ nesql --db ./store query "SELECT who, total FROM orders ORDER BY total DESC"
