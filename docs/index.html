@@ -171,7 +171,7 @@ header.topnav .navcta:hover{border-color:var(--amber)}
 <div class="hero">
   <div class="chain" aria-hidden="true">9c14e07a8f3b1d55 · 7af3c11e42d9a087 · e3b0c44298fc1c14 · 5d81f9a2c47b0e63 · a4127fe09b3d5c88 · 0f6e23d1b7a94c50 · 88e1b4c72fa03d69 · 3dd0a9f14b7e62c5 · b2094c7e51a8fd36 · 14a7e9d3c05b28f4 · 7c93e1a540b2d6f8 · 62f0d8b3a51c97e4 · 09d4b6a2e7c815f3 · 5a13c7e94d208bf6 · e7b29a45d1c306f8</div>
   <div class="wrap inner">
-    <div class="kicker"><span class="dot"></span> nedb-engine v8.0.0 · live on PyPI · npm · crates.io</div>
+    <div class="kicker"><span class="dot"></span> <span id="ver">nedb-engine v8.0.0</span> · live on PyPI · npm · crates.io</div>
     <h1 class="title">Every database stores <span class="grad">what</span>.<br>NEDB also stores <span class="grad">when, when it was true, and why.</span></h1>
     <p class="lede">NEDB is an embedded, tamper-evident database built on a <b>BLAKE2b hash chain</b> and a <b>content-addressed Merkle DAG</b>. Every write is a new immutable version. Every row can carry a <b>causal edge</b> naming the writes that caused it. Any auditor can <b>prove the history was never altered</b> — offline, without trusting the server.</p>
     <div class="installbar">
@@ -511,5 +511,19 @@ shop=> <span class="c-k">SELECT</span> total <span class="c-k">FROM</span> order
 
 </footer>
 
+<script>
+(function () {
+  var el = document.getElementById("ver");
+  if (!el || !el.textContent.match(/v[0-9]+\.[0-9]+\.[0-9]+/)) return;
+  var fallback = el.textContent;
+  fetch("https://pypi.org/pypi/nedb-engine/json")
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var v = d && d.info && d.info.version;
+      if (v) el.textContent = "nedb-engine v" + v;
+    })
+    .catch(function () { el.textContent = fallback; });
+})();
+</script>
 </body>
 </html>
