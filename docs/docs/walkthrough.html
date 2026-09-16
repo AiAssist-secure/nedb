@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Test nedb-engine end-to-end — clone → install → verify → benchmark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0e14;--bg2:#0f131c;--panel:#121724;--line:#232b3d;--line2:#2c3550;
+  --text:#e8ecf4;--dim:#9aa5bd;--faint:#6b7690;
+  --amber:#f97316;--amber2:#fbbf24;--emerald:#34d399;--cyan:#22d3ee;--rose:#fb7185;
+  --mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Inter',system-ui,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:960px;margin:0 auto;padding:0 28px}
+
+header{padding:64px 0 44px;border-bottom:1px solid var(--line);
+  background:radial-gradient(900px 400px at 75% -10%, rgba(249,115,22,.10), transparent 60%)}
+.kicker{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);border:1px solid rgba(249,115,22,.35);background:rgba(249,115,22,.08);padding:6px 13px;border-radius:999px}
+.kicker .dot{width:7px;height:7px;border-radius:50%;background:var(--emerald);box-shadow:0 0 10px var(--emerald)}
+h1{font-size:clamp(30px,4.6vw,46px);font-weight:800;letter-spacing:-.025em;line-height:1.1;margin:20px 0 14px}
+h1 .grad{background:linear-gradient(92deg,var(--amber),var(--amber2) 55%,var(--emerald));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{color:var(--dim);font-size:17px;max-width:720px}
+.lede b{color:var(--text)}
+.meta{display:flex;flex-wrap:wrap;gap:18px;margin-top:22px;font-family:var(--mono);font-size:12px;color:var(--faint)}
+.meta b{color:var(--dim);font-weight:500}
+
+ol.track{list-style:none;counter-reset:step;padding:56px 0 0}
+.step{counter-increment:step;padding:0 0 52px 66px;position:relative}
+.step::before{content:counter(step);position:absolute;left:0;top:0;width:42px;height:42px;border-radius:12px;
+  background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line2);
+  color:var(--amber2);font-family:var(--mono);font-weight:700;font-size:17px;display:flex;align-items:center;justify-content:center}
+.step::after{content:'';position:absolute;left:20px;top:50px;bottom:8px;width:1px;background:var(--line)}
+.step:last-child::after{display:none}
+.step h2{font-size:21px;font-weight:750;letter-spacing:-.015em;margin-bottom:6px}
+.step .why{color:var(--dim);font-size:14.5px;margin-bottom:14px}
+.step .why b{color:var(--text)}
+.terminal{background:#080b10;border:1px solid var(--line2);border-radius:12px;overflow:hidden;margin:14px 0}
+.terminal .bar{display:flex;align-items:center;gap:7px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+.terminal .bar i{width:10px;height:10px;border-radius:50%}
+.terminal .bar .r{background:#ff5f57}.terminal .bar .y{background:#febc2e}.terminal .bar .g{background:#28c840}
+.terminal .bar span{margin-left:6px;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.terminal pre{padding:16px 18px;font-family:var(--mono);font-size:13px;line-height:1.8;color:#d5dde8;overflow-x:auto}
+.terminal .p{color:var(--faint);user-select:none}
+.terminal .c{color:#c792ea}
+.terminal .s{color:#c3e88d}
+.terminal .o{color:#5b667d;font-style:italic}
+.terminal .g{color:var(--emerald)}
+.terminal .y{color:var(--amber2)}
+.note{background:rgba(52,211,153,.06);border:1px solid rgba(52,211,153,.25);border-radius:11px;padding:12px 16px;font-size:13.5px;color:var(--dim);margin:12px 0}
+.note b{color:var(--emerald)}
+.warn{background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.3);border-radius:11px;padding:12px 16px;font-size:13.5px;color:var(--dim);margin:12px 0}
+.warn b{color:var(--amber2)}
+
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:14px 0}
+th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:9px 12px;border-bottom:2px solid var(--line2)}
+td{padding:9px 12px;border-bottom:1px solid var(--line);color:var(--dim);font-family:var(--mono);font-size:12.5px}
+td:first-child{color:var(--text);font-family:var(--sans);font-size:13.5px}
+tr:last-child td{border-bottom:none}
+.yes{color:var(--emerald);font-weight:700}
+
+.checklist{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-top:10px}
+.checklist li{list-style:none;font-size:14px;color:var(--dim);padding:5px 0 5px 30px;position:relative}
+.checklist li::before{content:'☐';position:absolute;left:0;color:var(--amber2);font-size:16px}
+.checklist li b{color:var(--text)}
+
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:16px 0}
+@media(max-width:760px){.grid3{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+.card h3{font-size:14.5px;margin-bottom:6px}
+.card p{font-size:12.5px;color:var(--dim);font-family:var(--mono)}
+
+footer{padding:56px 0 80px;text-align:center;border-top:1px solid var(--line)}
+footer .cta{font-size:20px;font-weight:800;margin-bottom:10px}
+footer p{color:var(--dim);font-size:14px}
+.btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:22px}
+.btn{display:inline-block;font-weight:600;font-size:14px;padding:10px 22px;border-radius:10px;border:1px solid var(--line2);color:var(--text)}
+.btn:hover{border-color:var(--amber);text-decoration:none}
+.btn.primary{background:linear-gradient(92deg,var(--amber),#ea580c);border:none;color:#0b0e14}
+.credit{margin-top:36px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span> verification walkthrough · nedb-engine v9.0.0</div>
+    <h1>Clone it. Install it. <span class="grad">Prove it.</span></h1>
+    <p class="lede">A complete walkthrough for evaluating nedb-engine — from <b>git clone</b> to <b>live-registry installs</b> to <b>real tests and benchmarks you ran yourself</b>. Every command below is the same one the repo's own CI runs. Nothing here asks you to trust a claim.</p>
+    <div style="margin-top:18px;font-size:14px"><a href="index.html">← NEDB Docs</a> &nbsp;·&nbsp; <a href="https://github.com/aiassistsecure/nedb" target="_blank" rel="noopener noreferrer">Source →</a></div>
+    <div class="meta">
+      <span><b>Time</b> ~15 min</span>
+      <span><b>Needs</b> Python 3.9+ · Node 18+ · Rust stable · git</span>
+      <span><b>Works on</b> Linux · macOS · Windows (WSL or native)</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<ol class="track">
+
+<li class="step">
+  <h2>Clone the source</h2>
+  <p class="why">The <b>canonical repo</b> — engine, Rust core, the test suites, the benchmark scripts, the vendored PostgreSQL grammar.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal</span></div>
+  <pre><span class="p">$</span> git clone https://github.com/aiassistsecure/nedb
+<span class="p">$</span> <span class="c">cd</span> nedb
+<span class="p">$</span> git log --oneline -1
+<span class="o"># you are on the same master the releases ship from</span></pre></div>
+  <div class="note"><b>Verify it's real:</b> 500+ commits, 170+ version tags, and every release tag ever cut is in <code>git tag</code> — the release history is the audit trail.</div>
+</li>
+
+<li class="step">
+  <h2>Install from the live registries — the products, not the checkout</h2>
+  <p class="why">Evaluate what users get. Three registries, <b>same version, same tag</b> — the tri-distribution discipline.</p>
+  <div class="grid3">
+    <div class="card"><h3>PyPI</h3><p>pip install nedb-engine</p></div>
+    <div class="card"><h3>npm</h3><p>npm install nedb-engine</p></div>
+    <div class="card"><h3>crates.io</h3><p>cargo add nedb-engine</p></div>
+  </div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python side</span></div>
+  <pre><span class="p">$</span> python3 -m venv venv && <span class="c">source</span> venv/bin/activate
+<span class="p">$</span> pip install nedb-engine
+<span class="p">$</span> python3 -c <span class="s">"import nedb; print(nedb.__version__)"</span>
+<span class="g">9.0.0</span>
+<span class="p">$</span> which nesql nedbd        <span class="o"># the CLI + daemon binaries ride along</span></pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — node side</span></div>
+  <pre><span class="p">$</span> mkdir nedb-node-demo && <span class="c">cd</span> nedb-node-demo && npm init -y
+<span class="p">$</span> npm install nedb-engine
+<span class="p">$</span> node -e <span class="s">"const {NedbCore}=require('nedb-engine'); console.log('loaded ok')"</span></pre></div>
+  <div class="note"><b>What proves what:</b> if the install worked, the version printed matches the latest git tag, and the <code>nesql</code> CLI binary is on your PATH — the same compiled Rust binary the engine's release train stages into every wheel and tarball.</div>
+</li>
+
+<li class="step">
+  <h2>Run the real engine — write, query, time-travel, verify</h2>
+  <p class="why">60 seconds of <b>actual usage</b>: every core claim of the README, executed by you.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python</span></div>
+  <pre><span class="p">$</span> python3 &lt;&lt;'EOF'
+<span class="c">from</span> nedb <span class="c">import</span> NEDB
+
+db = NEDB(<span class="s">"./mydata"</span>)          <span class="o"># durable, hash-chained</span>
+db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span class="s">"name"</span>: <span class="s">"Ann"</span>, <span class="s">"age"</span>: <span class="y">31</span>})
+
+snap = db.seq                                   <span class="o"># time travel marker</span>
+db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span class="s">"name"</span>: <span class="s">"Ann"</span>, <span class="s">"age"</span>: <span class="y">32</span>})
+<span class="c">print</span>(db.get(<span class="s">"users"</span>, <span class="s">"alice"</span>, as_of=snap)[<span class="s">"age"</span>])   <span class="g"># → 31 — the past is reachable</span>
+
+db.put(<span class="s">"inputs"</span>, <span class="s">"m1"</span>, {<span class="s">"text"</span>: <span class="s">"prefers dark mode"</span>})
+seq = db.seq
+db.put(<span class="s">"beliefs"</span>, <span class="s">"b1"</span>, {<span class="s">"v"</span>: <span class="y">1</span>}, caused_by=[seq])  <span class="o"># causal edge</span>
+<span class="c">print</span>(db.query(<span class="s">'FROM beliefs WHERE _id = "b1" TRACE caused_by'</span>))
+<span class="c">print</span>(<span class="s">"verify:"</span>, db.verify())                      <span class="g"># → True — chain intact</span>
+EOF</pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — node</span></div>
+  <pre><span class="p">$</span> node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = new NedbCore();
+db.put('users','bob', JSON.stringify({age:24}));
+console.log('rows:', db.query('FROM users WHERE age > 20').length);  // 1
+console.log('verify:', db.verify());                                 // true
+"</span></pre></div>
+  <div class="note"><b>The one that matters:</b> <code>db.verify()</code>. Flip a byte in <code>./mydata</code> with a hex editor and run it again — the verdict flips to <code>False</code>. Tamper evidence you can break on purpose.</div>
+</li>
+
+<li class="step">
+  <h2>Run the nesql CLI — plain SQL, both dialects</h2>
+  <p class="why">The same store, spoken to in <b>PostgreSQL SQL and the FROM-form</b> — routed structurally, no flags.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal</span></div>
+  <pre><span class="p">$</span> nesql --db ./mydata query <span class="s">"SELECT name, age FROM users ORDER BY age DESC"</span>
+{<span class="s">"name"</span>:<span class="s">"Ann"</span>,<span class="s">"age"</span>:<span class="y">32</span>}
+(1 rows)
+
+<span class="p">$</span> nesql --db ./mydata query <span class="s">"FROM users WHERE age > 30"</span>
+{...}
+(1 rows, 1 scanned)
+
+<span class="p">$</span> nesql --db ./mydata version
+<span class="g">nesql    9.0.0  ·  engine 9.0.0  ·  grammar_v1 (digest)</span></pre></div>
+  <div class="note"><b>Exit codes are the contract:</b> <code>0</code> success · <code>1</code> failure · <code>2</code> usage · <code>3</code> could-not-determine · <code>4</code> not found · <code>5</code> unsupported. Try <code>nesql --db ./mydata get nosuch coll</code> and check <code>echo $?</code>.</div>
+</li>
+
+<li class="step">
+  <h2>Run the real test suites</h2>
+  <p class="why">The repo's own gates. These are the suites CI runs on every push — <b>now you run them too</b>.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python suites (from the clone)</span></div>
+  <pre><span class="p">$</span> <span class="c">cd</span> nedb
+<span class="p">$</span> python3 tests/test_nedb.py              <span class="o"># engine core</span>
+<span class="g">11/11 passed</span>
+<span class="p">$</span> python3 tests/test_bitemporal.py        <span class="o"># both time axes</span>
+<span class="g">28/28 passed</span>
+<span class="p">$</span> python3 tests/test_nql_predicates.py    <span class="o"># cross-engine parity</span>
+<span class="g">257 passed</span>
+<span class="p">$</span> python3 tests/test_nql_shaping.py
+<span class="g">157 passed</span>
+<span class="p">$</span> python3 tests/test_wallclock_as_of.py   <span class="o"># AS OF by datetime</span>
+<span class="g">25/25 passed</span></pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — rust core (needs the Rust toolchain)</span></div>
+  <pre><span class="p">$</span> <span class="c">cd</span> rust
+<span class="p">$</span> cargo test -p nedb-engine --lib
+<span class="g">639 passed</span>
+<span class="p">$</span> cargo test -p nedb-engine --tests      <span class="o"># integration, real subprocesses</span>
+<span class="g">all targets green</span></pre></div>
+  <div class="note"><b>Cross-engine parity is the point:</b> <code>test_nql_predicates</code> and <code>test_nql_shaping</code> run the same battery through the Python reference <i>and</i> the Rust core and assert identical answers — the guarantee that the two engines cannot quietly disagree.</div>
+</li>
+
+<li class="step">
+  <h2>Run the benchmarks — your machine, your numbers</h2>
+  <p class="why">Every published number in the repo names its machine and command. <b>Produce your own.</b></p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — embedded core</span></div>
+  <pre><span class="p">$</span> python3 bench/benchmarks.py --save
+<span class="o"># PUT ~63K/s · GET ~1.3M/s · AS OF (time-travel) reads ~940K/s</span>
+<span class="o"># your absolute numbers will differ; the RATIOS are the claim:</span>
+<span class="o"># time-travel reads cost ~30%, not 10x</span></pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — the daemon over HTTP</span></div>
+  <pre><span class="p">$</span> NEDBD_DAG=1 nedbd --data /tmp/perf &
+<span class="p">$</span> python3 tests/test_dag_perf.py --n 10000 --reads 100000
+<span class="o"># sequential writes · point reads · batch · tamper-verify throughput</span></pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — indexed range scans</span></div>
+  <pre><span class="p">$</span> python3 scripts/bench_index_range.py
+<span class="o"># point lookup 137ms → 0.01ms · BETWEEN 1% 186ms → 1.1ms</span></pre></div>
+  <div class="warn"><b>Honest numbers policy:</b> absolute figures are machine-specific and dated in the repo (<code>bench/RESULTS.md</code>, <code>docs/BENCH-sqlselect.md</code>). If your numbers diverge wildly from the published ratios, that's a finding — file it.</div>
+</li>
+
+<li class="step">
+  <h2>The full gate — daemon, wire protocols, tamper</h2>
+  <p class="why">The complete CI surface: <b>daemon HTTP, PostgreSQL wire, RESP2, encryption, crash boundaries</b>.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — the daemon, end to end</span></div>
+  <pre><span class="p">$</span> NEDBD_DAG=1 nedbd --data ./nedb-data &      <span class="o"># v2 DAG engine</span>
+<span class="p">$</span> curl http://127.0.0.1:7070/health
+<span class="g">{"ok":true,"version":"9.0.0","engine":"dag",...}</span>
+<span class="p">$</span> curl -X POST http://127.0.0.1:7070/v1/databases/shop/query \\
+    -H <span class="s">'Content-Type: application/json'</span> \\
+    -d <span class="s">'{"nql":"SELECT 1"}'</span>                   <span class="o"># SQL over HTTP</span>
+<span class="p">$</span> NEDBD_RESP2_PORT=6380 nedbd --data ./nedb-data &   <span class="o"># + redis-cli compat</span>
+<span class="p">$</span> redis-cli -p 6380 EVAL <span class="s">'FROM orders LIMIT 5'</span> 0
+<span class="p">$</span> python3 tests/test_pgwire.py               <span class="o"># real psql/libpq client</span></pre></div>
+  <div class="checklist"><ul>
+    <li><b>Source cloned</b> — release history auditable via git tags</li>
+    <li><b>Installed from all three registries</b> — one version on one tag</li>
+    <li><b>Core semantics proven</b> — time travel, provenance, verify</li>
+    <li><b>Both SQL dialects through the CLI</b> — exit codes as contract</li>
+    <li><b>Test suites green on your machine</b> — parity included</li>
+    <li><b>Benchmarks run by you</b> — ratios match the claims</li>
+    <li><b>Daemon + wire protocols exercised</b> — the full CI surface</li>
+  </ul></div>
+</li>
+
+</ol>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div class="cta">You just verified a database without trusting anyone.</div>
+    <p>That was the point. Every claim in the README is reproducible from the clone — this walkthrough is just the order.</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/aiassistsecure/nedb">github.com/aiassistsecure/nedb →</a>
+      <a class="btn" href="https://pypi.org/project/nedb-engine/">PyPI</a>
+      <a class="btn" href="https://www.npmjs.com/package/nedb-engine">npm</a>
+      <a class="btn" href="https://crates.io/crates/nedb-engine">crates.io</a>
+    </div>
+    <div class="btns"><a class="btn" href="index.html">← Back to NEDB Docs</a><a class="btn" href="https://github.com/aiassistsecure/nedb" target="_blank" rel="noopener noreferrer">Source</a></div>
+    <div class="credit">nedb-engine v9.0.0 · BUSL-1.1, free under $1M revenue · the numbers are yours to reproduce</div>
+  </div>
+</footer>
+
+</body>
+</html>

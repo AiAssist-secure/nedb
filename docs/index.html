@@ -39,6 +39,8 @@ h1.title .grad{background:linear-gradient(92deg,var(--amber),var(--amber2) 55%,v
 .installbar{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}
 .installbar code{font-family:var(--mono);font-size:13.5px;background:var(--panel);border:1px solid var(--line2);padding:11px 16px;border-radius:10px;color:var(--emerald)}
 .installbar code b{color:var(--faint);font-weight:400}
+.badge-wall{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px;align-items:center}
+.badge-wall img{height:20px;display:block}
 .metarow{display:flex;flex-wrap:wrap;gap:22px;margin-top:26px;font-family:var(--mono);font-size:12.5px;color:var(--faint)}
 .metarow span b{color:var(--dim);font-weight:500}
 
@@ -163,7 +165,7 @@ header.topnav .navcta:hover{border-color:var(--amber)}
       <a href="#performance" style="color:var(--dim)">Performance</a>
       <a href="#track-record" style="color:var(--dim)">History</a>
       <a href="reference.html" style="color:var(--dim)">Reference</a>
-      <a href="https://github.com/Eth-Interchained/nedb" target="_blank" rel="noopener noreferrer" class="navcta">GitHub</a>
+      <a href="https://github.com/aiassistsecure/nedb" target="_blank" rel="noopener noreferrer" class="navcta">GitHub</a>
     </nav>
   </div>
 </header>
@@ -171,7 +173,7 @@ header.topnav .navcta:hover{border-color:var(--amber)}
 <div class="hero">
   <div class="chain" aria-hidden="true">9c14e07a8f3b1d55 · 7af3c11e42d9a087 · e3b0c44298fc1c14 · 5d81f9a2c47b0e63 · a4127fe09b3d5c88 · 0f6e23d1b7a94c50 · 88e1b4c72fa03d69 · 3dd0a9f14b7e62c5 · b2094c7e51a8fd36 · 14a7e9d3c05b28f4 · 7c93e1a540b2d6f8 · 62f0d8b3a51c97e4 · 09d4b6a2e7c815f3 · 5a13c7e94d208bf6 · e7b29a45d1c306f8</div>
   <div class="wrap inner">
-    <div class="kicker"><span class="dot"></span> nedb-engine v8.0.0 · live on PyPI · npm · crates.io</div>
+    <div class="kicker"><span class="dot"></span> <span id="ver">nedb-engine v8.0.0</span> · live on PyPI · npm · crates.io</div>
     <h1 class="title">Every database stores <span class="grad">what</span>.<br>NEDB also stores <span class="grad">when, when it was true, and why.</span></h1>
     <p class="lede">NEDB is an embedded, tamper-evident database built on a <b>BLAKE2b hash chain</b> and a <b>content-addressed Merkle DAG</b>. Every write is a new immutable version. Every row can carry a <b>causal edge</b> naming the writes that caused it. Any auditor can <b>prove the history was never altered</b> — offline, without trusting the server.</p>
     <div class="installbar">
@@ -179,6 +181,18 @@ header.topnav .navcta:hover{border-color:var(--amber)}
       <code>npm install nedb-engine</code>
       <code>cargo add nedb-engine</code>
       <code><b># one Rust core → three registries, one version, one tag</b></code>
+    </div>
+    <div class="badge-wall">
+      <img alt="PyPI" src="https://img.shields.io/pypi/v/nedb-engine?label=PyPI&logo=pypi&logoColor=white&color=6366f1&style=flat-square">
+      <img alt="npm" src="https://img.shields.io/npm/v/nedb-engine?label=npm&logo=npm&logoColor=white&color=00d4ff&style=flat-square">
+      <img alt="crates.io" src="https://img.shields.io/crates/v/nedb-engine?label=crates.io&logo=rust&logoColor=white&color=f97316&style=flat-square">
+      <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Eth-Interchained/nedb/test.yml?branch=master&label=CI&logo=githubactions&logoColor=white&color=34d399&style=flat-square&v=9">
+      <img alt="License" src="https://img.shields.io/badge/license-BUSL--1.1-f59e0b?style=flat-square">
+      <img alt="Apache at Change Date" src="https://img.shields.io/badge/Apache%202.0-2030--09--11-22c55e?style=flat-square">
+      <img alt="releases" src="https://img.shields.io/github/v/tag/Eth-Interchained/nedb?label=releases&color=a855f7&style=flat-square">
+      <img alt="commits" src="https://img.shields.io/github/commit-activity/t/Eth-Interchained/nedb?label=commits&color=818cf8&style=flat-square">
+      <img alt="issues" src="https://img.shields.io/github/issues/Eth-Interchained/nedb?label=issues&color=fb7185&style=flat-square">
+      <img alt="discuss" src="https://img.shields.io/badge/verify-it%20yourself-34d399?style=flat-square">
     </div>
     <div class="metarow">
       <span><b>License</b> BUSL-1.1 — free under $1M revenue, Apache 2.0 at the Change Date</span>
@@ -483,13 +497,21 @@ shop=> <span class="c-k">SELECT</span> total <span class="c-k">FROM</span> order
     <div class="cta">If a fact matters, put it somewhere that can prove itself.</div>
     <p>NEDB — versioned, time-traveling, bi-temporal, causally-provable. Free in production under $1M revenue.</p>
     <div class="btns">
-      <a class="btn primary" href="https://github.com/Eth-Interchained/nedb" target="_blank" rel="noopener noreferrer">Read the source →</a>
+      <a class="btn primary" href="https://github.com/aiassistsecure/nedb" target="_blank" rel="noopener noreferrer">Read the source →</a>
       <a class="btn" href="https://studio.interchained.org" target="_blank" rel="noopener noreferrer">Try the Studio</a>
       <a class="btn" href="https://pypi.org/project/nedb-engine/" target="_blank" rel="noopener noreferrer">PyPI</a>
       <a class="btn" href="https://www.npmjs.com/package/nedb-engine" target="_blank" rel="noopener noreferrer">npm</a>
       <a class="btn" href="https://crates.io/crates/nedb-engine" target="_blank" rel="noopener noreferrer">crates.io</a>
     </div>
-    <div class="credit">© 2026 INTERCHAINED LLC · nedb-engine v8.0.0 · every figure on this page dated and reproducible from the repo</div>
+    <div class="badge-wall" style="justify-content:center;margin-bottom:18px">
+        <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-6366f1?logo=python&logoColor=white&style=flat-square">
+        <img alt="Node" src="https://img.shields.io/badge/Node-18%2B-34d399?logo=nodedotjs&logoColor=white&style=flat-square">
+        <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-f97316?logo=rust&logoColor=white&style=flat-square">
+        <img alt="PostgreSQL wire" src="https://img.shields.io/badge/PostgreSQL%20wire-simple%20%2B%20extended-336791?logo=postgresql&logoColor=white&style=flat-square">
+        <img alt="RESP2" src="https://img.shields.io/badge/RESP2-redis--cli%20compatible-dc382d?style=flat-square">
+        <img alt="encryption" src="https://img.shields.io/badge/AES--256--GCM-at%20rest-818cf8?style=flat-square">
+      </div>
+      <div class="credit">© 2026 INTERCHAINED LLC · every figure on this page dated and reproducible from the repo</div>
   </div>
 <section id="docs" style="border-bottom:none">
   <div class="wrap">
@@ -498,18 +520,34 @@ shop=> <span class="c-k">SELECT</span> total <span class="c-k">FROM</span> order
     <p class="sub">This page summarizes the repository; the repository is the proof. These are the primary documents.</p>
     <div class="pillars">
       <div class="pillar"><div class="ic">📘</div><h3><a href="reference.html">API reference</a></h3><p>The full reference site: query language, clients, daemon routes.</p></div>
-      <div class="pillar"><div class="ic">📜</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/SPEC.md" target="_blank" rel="noopener noreferrer">docs/SPEC.md</a></h3><p>The formal spec — v2 object store, v3 substrate, the durability model.</p></div>
-      <div class="pillar"><div class="ic">🧾</div><h3><a href="https://github.com/Eth-Interchained/nedb#readme" target="_blank" rel="noopener noreferrer">README.md</a></h3><p>Every capability and every benchmark with its reproduce command.</p></div>
+      <div class="pillar"><div class="ic">📜</div><h3><a href="https://github.com/aiassistsecure/nedb/blob/master/docs/SPEC.md" target="_blank" rel="noopener noreferrer">docs/SPEC.md</a></h3><p>The formal spec — v2 object store, v3 substrate, the durability model.</p></div>
+      <div class="pillar"><div class="ic">🧾</div><h3><a href="https://github.com/aiassistsecure/nedb#readme" target="_blank" rel="noopener noreferrer">README.md</a></h3><p>Every capability and every benchmark with its reproduce command.</p></div>
     </div>
     <div class="pillars" style="margin-top:16px">
-      <div class="pillar"><div class="ic">🔧</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/CLI.md" target="_blank" rel="noopener noreferrer">docs/CLI.md</a></h3><p>nedb-cli, nedb-inspector, nesql — operating a store offline.</p></div>
-      <div class="pillar"><div class="ic">🛡️</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/DURABILITY.md" target="_blank" rel="noopener noreferrer">docs/DURABILITY.md</a></h3><p>Flush contracts, crash boundaries, what a power cut actually costs.</p></div>
-      <div class="pillar"><div class="ic">📡</div><h3><a href="https://github.com/Eth-Interchained/nedb/blob/master/docs/REPLICATION.md" target="_blank" rel="noopener noreferrer">docs/REPLICATION.md</a></h3><p>tip / since / scan_status — the replication contract.</p></div>
+      <div class="pillar"><div class="ic">🔧</div><h3><a href="https://github.com/aiassistsecure/nedb/blob/master/docs/CLI.md" target="_blank" rel="noopener noreferrer">docs/CLI.md</a></h3><p>nedb-cli, nedb-inspector, nesql — operating a store offline.</p></div>
+      <div class="pillar"><div class="ic">🛡️</div><h3><a href="https://github.com/aiassistsecure/nedb/blob/master/docs/DURABILITY.md" target="_blank" rel="noopener noreferrer">docs/DURABILITY.md</a></h3><p>Flush contracts, crash boundaries, what a power cut actually costs.</p></div>
+      <div class="pillar" style="border-color:rgba(249,115,22,.4)"><div class="ic">🧪</div><h3><a href="docs/walkthrough.html">Test it yourself — clone → verify → benchmark</a></h3><p>The full evaluation walkthrough: install from all three registries, run the real test suites and benchmarks on your machine.</p></div>
+      <div class="pillar"><div class="ic">📚</div><h3><a href="docs/index.html">Deep dives — the official docs</a></h3><p>Provenance & time, the query language, wire protocols, durability, replication, Cast, architecture — the whole surface, page by page.</p></div>
+      <div class="pillar"><div class="ic">📡</div><h3><a href="https://github.com/aiassistsecure/nedb/blob/master/docs/REPLICATION.md" target="_blank" rel="noopener noreferrer">docs/REPLICATION.md</a></h3><p>tip / since / scan_status — the replication contract.</p></div>
     </div>
   </div>
 </section>
 
 </footer>
 
+<script>
+(function () {
+  var el = document.getElementById("ver");
+  if (!el || !el.textContent.match(/v[0-9]+\.[0-9]+\.[0-9]+/)) return;
+  var fallback = el.textContent;
+  fetch("https://pypi.org/pypi/nedb-engine/json")
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var v = d && d.info && d.info.version;
+      if (v) el.textContent = "nedb-engine v" + v;
+    })
+    .catch(function () { el.textContent = fallback; });
+})();
+</script>
 </body>
 </html>
