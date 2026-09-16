@@ -25,7 +25,40 @@ fn store_with_doc() -> tempfile::TempDir {
     dir
 }
 
+/// Spawn the CLI against `args`.
+///
+/// The store a test just dropped may still be going through its background
+/// cold-scan, and the scan thread holds the data-dir lock until it finishes —
+/// so a spawn that races the scan fails with "locked by another process"
+/// through no fault of the CLI. Poll for the lock to free (bounded): the same
+/// eventual-property discipline the ticker tests use, never a sleep-guess.
 fn run(args: &[&str]) -> Output {
+    // When the first arg is a store path that exists, wait for it to be
+    // openable before the real spawn.
+    if let Some(path) = args.iter().find(|a| !a.starts_with('-')) {
+        if std::path::Path::new(path).exists() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let probe = Db::open(std::path::Path::new(path), None);
+                match probe {
+                    Ok(db) => {
+                        drop(db); // release the lock immediately
+                        break;
+                    }
+                    Err(e) if e.to_string().contains("locked") => {
+                        if std::time::Instant::now() > deadline {
+                            // Give up waiting — run the real spawn and let IT
+                            // report the lock error, so a genuine bug still
+                            // surfaces as a failure with its real message.
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(_) => break, // a different error — let the spawn report it
+                }
+            }
+        }
+    }
     Command::new(BIN).args(args).output().expect("spawn nedb-cli")
 }
 

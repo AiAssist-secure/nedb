@@ -1260,18 +1260,49 @@ pub fn translate(sql_raw: &str) -> Result<Stmt, String> {
     if let Some(at) = find_kw(&tu, "AS OF SYSTEM TIME") {
         let before = tail[..at].to_string();
         let after = tail[at + "AS OF SYSTEM TIME".len()..].trim_start().to_string();
-        // Take the sequence token; the rest of the tail follows it.
-        let end = after.find(' ').unwrap_or(after.len());
-        let seq = after[..end].trim().trim_matches('\'').trim_matches('"').to_string();
-        if seq.parse::<u64>().is_err() {
-            return Err(format!(
-                "AS OF SYSTEM TIME takes a NEDB sequence number here, not a timestamp (got {:?}). \
-                 NEDB's history is sequence-addressed and never garbage-collected, so a seq is \
-                 exact where a wall-clock time would be approximate", seq));
+        // Take the argument token. A QUOTED datetime may contain spaces
+        // ('2026-01-01 12:00:00') — cut at the CLOSING quote, not the first
+        // space, or the second half of the datetime leaks into the tail and
+        // parses as garbage. A bare token still cuts at whitespace.
+        let (arg, rest) = if let Some(stripped) = after.strip_prefix('\'') {
+            match stripped.find('\'') {
+                Some(close) => (after[..close + 2].to_string(), after[close + 2..].trim_start()),
+                None => return Err(format!(
+                    "AS OF SYSTEM TIME: an unterminated string literal in the datetime                      position: {after:?}")),
+            }
+        } else if let Some(stripped) = after.strip_prefix('"') {
+            match stripped.find('"') {
+                Some(close) => (after[..close + 2].to_string(), after[close + 2..].trim_start()),
+                None => return Err(format!(
+                    "AS OF SYSTEM TIME: an unterminated string literal in the datetime                      position: {after:?}")),
+            }
+        } else {
+            let end = after.find(' ').unwrap_or(after.len());
+            (after[..end].to_string(), after[end..].trim_start())
+        };
+        let arg = arg.trim().trim_matches('\'').trim_matches('"').to_string();
+        // Resolved by TYPE: a bare integer stays a sequence (the original
+        // contract, byte-for-byte); a quoted string is a wall-clock moment.
+        // The marker carries the high bit so a datetime can never collide
+        // with a real seq; the temporal map below resolves it against the
+        // store's ts index where the Db is in hand. The sqlselect parser
+        // applies the same rule (one grammar, two front-ends).
+        if arg.parse::<u64>().is_ok() {
+            tail = format!("{} AS OF {} {}", before.trim(), arg, rest)
+                .trim()
+                .to_string();
+        } else {
+            let marker = crate::wallclock::WallClock::parse(&arg)
+                .map_err(|e| format!(
+                    "AS OF SYSTEM TIME: {} — accepted forms: an ISO 8601 datetime \
+                     or date, or unix seconds/millis with an explicit s/ms unit; \
+                     a bare integer stays a sequence number",
+                    e))?
+                .as_marker();
+            tail = format!("{} AS OF {} {}", before.trim(), marker, rest)
+                .trim()
+                .to_string();
         }
-        tail = format!("{} AS OF {} {}", before.trim(), seq, after[end..].trim())
-            .trim()
-            .to_string();
     }
 
     // ── ORDER BY <ordinal> → ORDER BY <that select-list column> ─────────────
@@ -3517,6 +3548,48 @@ fn try_catalog_select(
     // present, and it does it silently. The query `... orders AS OF 1 o JOIN
     // orders n ...` returned the CURRENT value for both sides and looked fine.
     let temporal: std::collections::HashMap<String, u64> = {
+        // Wall-clock markers (a quoted datetime in `AS OF SYSTEM TIME ''`)
+        // resolve to real sequences HERE, before the one-scan-per-name
+        // reconciliation, so two datetime spellings naming the same moment
+        // are equal — and a wall-clock + tip mix reports "at the tip and AS
+        // OF <seq>" honestly rather than leaking a tagged marker into the
+        // executor. Resolution is `Db::seq_at`: the last seq whose write-time
+        // is at or before the moment, over the ts index the cold scan fills.
+        let resolve_marker = |m: u64| -> Result<u64, Vec<u8>> {
+            if (m & crate::wallclock::WALL_CLOCK_FLAG) == 0 {
+                return Ok(m); // bare integer — a seq, untouched, backcompat
+            }
+            let moment = crate::wallclock::WallClock::from_marker(m)
+                .ok_or_else(|| err_msg("0A000", "invalid wall-clock marker"))?;
+            let db = db.ok_or_else(|| err_msg("0A000",
+                "AS OF SYSTEM TIME by datetime names a database; connect with one"))?;
+            if !db.ts_index_ready() {
+                return Err(err_msg("0A000",
+                    "the write-time index is not ready on this boot (warm start defers it). \
+                     Run `nedb-cli repair` or a cold scan, or AS OF a bare sequence number"));
+            }
+            match db.seq_at(moment.epoch_secs()) {
+                Some(seq) => Ok(seq),
+                None => {
+                    let floor = db.history_floor();
+                    // Distinguish "before anything" from "pruned" — the two
+                    // read differently to an operator (one is routine, the
+                    // other is the compaction tradeoff answering).
+                    if floor > 0 {
+                        Err(err_msg("0A000", &format!(
+                            "history at or before that moment is no longer available — \
+                             the store was compacted past it (history floor {}). \
+                             AS OF a bare sequence at or after the floor instead", floor)))
+                    } else {
+                        Err(err_msg("0A000", &format!(
+                            "no writes at or before that moment in this database — \
+                             nothing existed yet (the first write is at seq {}). \
+                             A timestamp answers about the past; there is no past here yet", 
+                            db.seq.load(std::sync::atomic::Ordering::SeqCst))))
+                    }
+                }
+            }
+        };
         // Gather every sequence each name is read at first, INCLUDING the
         // absent one, then judge. Deciding as we walk got this wrong: the
         // first arm of a self-join was judged before it had been recorded, so
@@ -3524,9 +3597,13 @@ fn try_catalog_select(
         let mut seen: std::collections::HashMap<String, Vec<Option<u64>>> =
             std::collections::HashMap::new();
         for t in sel.from.iter().chain(sel.joins.iter().map(|j| &j.table)) {
+            let resolved = match t.as_of {
+                Some(m) => Some(resolve_marker(m).map_err(|e| e)?),
+                None => None,
+            };
             seen.entry(catalog_name(&t.name).to_ascii_lowercase())
                 .or_default()
-                .push(t.as_of);
+                .push(resolved);
         }
         let mut out: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for (key, ats) in &seen {
@@ -4808,9 +4885,21 @@ mod tests {
                    "FROM orders AS OF 42");
         assert_eq!(q("SELECT * FROM orders AS OF SYSTEM TIME 42 WHERE total > 1"),
                    "FROM orders AS OF 42 WHERE total > 1");
-        // A wall-clock timestamp is refused with the reason, not silently ignored.
-        let e = translate("SELECT * FROM orders AS OF SYSTEM TIME '2026-01-01'").unwrap_err();
-        assert!(e.contains("sequence number"), "{}", e);
+        // A quoted datetime is a TAGGED marker (high bit — no real seq ever
+        // sets it): the temporal map resolves it to a real seq where the Db
+        // is in hand. Garbage in the quoted position still refuses, naming
+        // the accepted forms.
+        let translated = q("SELECT * FROM orders AS OF SYSTEM TIME '2026-01-01'");
+        let marker: u64 = translated
+            .split(" AS OF ").nth(1).and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .expect("the translated form carries the marker");
+        assert_ne!(marker & crate::wallclock::WALL_CLOCK_FLAG, 0,
+            "a datetime must arrive as a tagged marker, not a bare seq");
+        let moment = crate::wallclock::WallClock::from_marker(marker).expect("decodes");
+        assert_eq!(moment.epoch_secs(), 1_767_225_600.0); // 2026-01-01T00:00:00Z
+        let e = translate("SELECT * FROM orders AS OF SYSTEM TIME 'not a time'").unwrap_err();
+        assert!(e.contains("unrecognized datetime"), "{}", e);
     }
 
     /// A select-list item that is not a column reference must be REFUSED, not

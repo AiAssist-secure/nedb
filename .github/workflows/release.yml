@@ -536,7 +536,7 @@ jobs:
           # Globbed rather than enumerated: an enumerated list silently drops a
           # newly-added platform, which is exactly how the 2.5.x wrapper went
           # missing from the published package for three releases.
-          for f in nedbd-v2-*; do
+          for f in nedbd-v2-* nesql-*; do
             [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f" --clobber || true
           done
       - uses: actions/upload-artifact@v4
@@ -545,6 +545,7 @@ jobs:
           path: |
             *.node
             nedbd-v2-*
+            nesql-*
             index.js
             index.d.ts
             native.js
@@ -625,6 +626,7 @@ jobs:
               # above; --clobber makes the download idempotent. darwin-arm64 and
               # darwin-x64 come from Codemagic.)
               gh release download "$VERSION" --pattern "nedbd-v2-*" --dir . --clobber || true
+              gh release download "$VERSION" --pattern "nesql-*" --dir . --clobber || true
               break
             fi
             if [ "$i" -eq 35 ]; then
@@ -632,6 +634,7 @@ jobs:
               # Still grab whatever nedbd-v2-* assets exist on the release so we
               # ship at minimum the linux/windows binaries we know are uploaded.
               gh release download "$VERSION" --pattern "nedbd-v2-*" --dir . --clobber || true
+              gh release download "$VERSION" --pattern "nesql-*" --dir . --clobber || true
             fi
             sleep 60
           done
@@ -640,7 +643,7 @@ jobs:
       - name: Make nedbd-v2 binaries executable
         shell: bash
         run: |
-          for f in nedbd-v2-linux-x64 nedbd-v2-darwin-arm64 nedbd-v2-darwin-x64; do
+          for f in nedbd-v2-* nesql-*; do
             [ -f "$f" ] && chmod +x "$f"
           done
           ls -lh nedbd-v2-* 2>/dev/null || true

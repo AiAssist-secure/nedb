@@ -30,6 +30,7 @@ pub mod diff;
 pub mod refs;
 pub mod constitution;
 pub mod cause;
+pub mod wallclock;
 pub mod branch;
 pub mod merge;
 pub mod conflict;

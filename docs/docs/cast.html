@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cast — the AI planner — NEDB Documentation</title>
+<meta name="description" content="A 3.33M-parameter local model that plans queries. Safety by construction.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--sb:#0b0e14;--sb2:#0f131c;--line:#232b3d;--line2:#2c3550;--text:#1f2430;--dim:#5b6474;
+--faint:#8a93a3;--amber:#ea580c;--amber2:#c2410c;--emerald:#059669;--cyan:#0891b2;--code-bg:#0b0e14;
+--sans:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono',ui-monospace,monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:var(--sans);color:var(--text);line-height:1.7;font-size:16px;background:#fff}
+a{color:var(--amber2);text-decoration:none}a:hover{text-decoration:underline}
+.layout{display:flex;min-height:100vh}
+/* sidebar */
+.sidebar{width:290px;flex-shrink:0;background:var(--sb);color:#cdd5e1;position:sticky;top:0;height:100vh;overflow-y:auto;padding:26px 0 40px}
+.sidebar .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;color:#fff;padding:0 24px 18px;letter-spacing:-.02em;text-decoration:none}
+.sidebar .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--emerald);box-shadow:0 0 12px var(--emerald)}
+.sidebar .brand small{font-family:var(--mono);font-size:10.5px;color:#6b7690;font-weight:400;margin-left:auto}
+.sgroup{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#6b7690;padding:18px 24px 6px}
+.sidebar a.item{display:block;padding:7px 24px;font-size:14px;color:#9aa5bd;text-decoration:none;border-left:3px solid transparent}
+.sidebar a.item:hover{color:#fff;background:rgba(255,255,255,.04);text-decoration:none}
+.sidebar a.item.active{color:#fff;border-left-color:var(--emerald);background:rgba(52,211,153,.08)}
+.search{margin:4px 20px 10px}
+.search input{width:100%;background:var(--sb2);border:1px solid var(--line);border-radius:9px;color:#e8ecf4;font-family:var(--sans);font-size:13.5px;padding:9px 12px;outline:none}
+.search input:focus{border-color:var(--line2)}
+/* content */
+.main{flex:1;min-width:0;background:#fff}
+.content{max-width:820px;padding:48px 56px 80px}
+.crumbs{font-family:var(--mono);font-size:12px;color:var(--faint);margin-bottom:18px}
+.crumbs a{color:var(--faint)}.crumbs a:hover{color:var(--amber2)}
+h1{font-size:34px;font-weight:800;letter-spacing:-.025em;line-height:1.15;margin-bottom:14px}
+h2{font-size:22px;font-weight:750;letter-spacing:-.015em;margin:38px 0 12px;padding-top:8px}
+h3{font-size:17px;font-weight:700;margin:24px 0 8px}
+p{margin:0 0 14px}
+.lede{font-size:18.5px;color:#3a4152;border-left:3px solid var(--emerald);padding-left:16px;margin-bottom:24px}
+ul,ol{margin:0 0 14px 22px}
+li{margin-bottom:6px}
+code{font-family:var(--mono);font-size:.86em;background:#f1f3f7;border:1px solid #e4e8ef;border-radius:5px;padding:1.5px 6px;color:#0f172a}
+pre{background:var(--code-bg);border:1px solid #1c2331;border-radius:12px;padding:18px 20px;overflow-x:auto;margin:16px 0 20px}
+pre code{background:none;border:none;color:#d5dde8;padding:0;font-size:13px;line-height:1.7}
+table{border-collapse:collapse;width:100%;font-size:14.5px;margin:16px 0 20px}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);text-align:left;padding:9px 12px;border-bottom:2px solid #e4e8ef}
+td{padding:9px 12px;border-bottom:1px solid #eef1f5;color:#3a4152;vertical-align:top}
+td:first-child{color:var(--text);font-weight:600}
+.callout{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:14px 18px;margin:16px 0 20px;font-size:14.5px}
+.pager{display:flex;justify-content:space-between;gap:16px;margin-top:52px;padding-top:22px;border-top:1px solid #eef1f5}
+.pager a{display:block;max-width:46%;padding:14px 18px;border:1px solid #e4e8ef;border-radius:12px;color:var(--text);font-weight:600;font-size:14px}
+.pager a:hover{border-color:var(--amber);text-decoration:none}
+.pager a small{display:block;font-family:var(--mono);font-size:11px;color:var(--faint);font-weight:400;margin-bottom:3px}
+.pager a.next{text-align:right;margin-left:auto}
+.editlink{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:26px}
+.editlink a{color:var(--faint)}
+@media(max-width:900px){.sidebar{position:fixed;left:-300px;transition:.2s;z-index:99}.sidebar.open{left:0}.content{padding:28px 22px 60px}.menu-btn{display:block !important}}
+.menu-btn{display:none;position:fixed;top:12px;left:12px;z-index:100;background:var(--sb);color:#fff;border:1px solid var(--line2);border-radius:9px;font-size:17px;padding:7px 13px;cursor:pointer}
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+<div class="layout">
+<nav class="sidebar">
+  <a class="brand" href="index.html"><span class="dot"></span>NEDB Docs <small>v8.0.0</small></a>
+  <div class="search"><input type="search" placeholder="Filter pages…" oninput="filterPages(this.value)"></div>
+  <div class="sgroup">Getting started</div>
+  <a class="item" data-slug="index" href="index.html">Introduction</a>
+  <div class="sgroup">Core concepts</div>
+  <a class="item" data-slug="provenance" href="provenance.html">Provenance &amp; Time</a>
+  <a class="item" data-slug="nesql" href="nesql.html">The Query Language — neSQL</a>
+  <a class="item" data-slug="nql" href="nql.html">The FROM-form in Depth</a>
+  <div class="sgroup">Running it</div>
+  <a class="item" data-slug="protocols" href="protocols.html">Wire Protocols</a>
+  <a class="item" data-slug="durability" href="durability.html">Durability</a>
+  <a class="item" data-slug="replication" href="replication.html">Replication</a>
+  <a class="item" data-slug="cast" href="cast.html">Cast — the AI planner</a>
+  <a class="item" data-slug="clients" href="clients.html">Clients &amp; Adapters</a>
+  <div class="sgroup">Reference</div>
+  <a class="item" data-slug="cli" href="cli.html">CLI Tools</a>
+  <a class="item" data-slug="architecture" href="architecture.html">Architecture</a>
+  <a class="item" data-slug="releasing" href="releasing.html">Releasing</a>
+</nav>
+<main class="main"><div class="content">
+  <div class="crumbs"><a href="index.html">NEDB Docs</a> / Running it / Cast — the AI planner</div>
+  
+<p class="lede">Cast turns a short English prompt into a query plan, using a
+<b>3.33M-parameter model that runs locally on CPU</b> — no API key, no network call, no per-token
+bill. Ten clauses and six operators is the whole grammar; small enough that a small model can
+learn it completely, and small enough that shipping every query to a frontier model is an absurd
+amount of machinery.</p>
+
+<h2>The safety properties</h2>
+<table>
+<tr><th>Property</th><th>What it means</th></tr>
+<tr><td>The model never executes</td><td>It emits text; the text goes through the same query path a hand-typed query uses. There is no second executor to audit.</td></tr>
+<tr><td>Validation is parsing</td><td>Parse and execute share one code path, so they cannot disagree about what is well-formed. Invalid output is refused with the offending text.</td></tr>
+<tr><td><code>execute</code> defaults to false</td><td>You get a plan for review. Running a guess silently is worse than admitting uncertainty.</td></tr>
+</table>
+
+<p>That last default earns its keep. A real miss: <i>"paid orders over 100"</i> planned as
+<code>LIMIT 100</code> instead of <code>total &gt; 100</code> — and the count came back
+<i>correct anyway</i>, because both paid orders happened to exceed 100. A count-only assertion
+would have scored it a pass. A human reading the plan catches it; an auto-executing client
+does not.</p>
+
+<h2>Why the planner lives in the engine</h2>
+<p>The hard part of NL querying is the <b>schema</b>, and a client's copy is stale on arrival.
+The engine holds the live collection list, so a plan naming a collection that does not exist
+returns <b>422 with the reason</b> — never silently empty rows, because zero rows reads as "no
+matching data", which would be a lie. Every daemon client inherits this.</p>
+
+<h2>Drift — the failure <code>valid</code> cannot catch</h2>
+<p>A model outside its vocabulary substitutes a memorised literal:
+<i>"memories about pricing"</i> became <code>SEARCH "handoff"</code> — which parses, names a real
+collection, returns real rows, and answers a question nobody asked. Measured on the released
+checkpoint: in-vocabulary terms copied 3/3; out-of-vocabulary terms 0/3. So the response carries
+a <code>drift</code> field when a quoted literal does not appear in the prompt — advisory, never
+fatal, validated at 24/24 with zero false alarms (correctly inferred enum values stay silent).
+An unattended caller should gate on all three:
+<code>plan["valid"] and plan["collection_known"] and not plan.get("drift")</code>.</p>
+
+<h2>Where it is strong (and weak) — measured</h2>
+<table>
+<tr><th>Clause</th><th>Exact-plan match (eval)</th></tr>
+<tr><td><code>TRACE caused_by</code></td><td>96.5%</td></tr>
+<tr><td><code>TRAVERSE</code></td><td>93.3%</td></tr>
+<tr><td>single <code>WHERE</code></td><td>91.2%</td></tr>
+<tr><td><code>LIMIT</code></td><td>91.1%</td></tr>
+<tr><td><code>SEARCH</code></td><td>90.5%</td></tr>
+<tr><td><code>ORDER BY</code></td><td>87.7%</td></tr>
+<tr><td>two+ <code>WHERE</code></td><td>85.1% (61.2% adversarial holdout)</td></tr>
+<tr><td><code>GROUP BY</code> + aggregate</td><td>77.0%</td></tr>
+</table>
+
+<p>Two habits avoid most misses: <b>name the field</b> when a number could be a limit ("orders
+with total over 100" beats "orders over 100"), and <b>check numbers over four digits</b> —
+digits tokenize one at a time, so <code>400000</code> can come back <code>4000</code>. The model
+card publishes every failure mode with examples.</p>
+
+<h2>Enabling it</h2>
+<pre><code># compile-time: cargo install nedb-engine --features cast
+# weights (~13 MB): GitHub release asset, checksum-verified on load
+nedbd --dag --cast ./data</code></pre>
+
+<p>Off by default, feature-gated at compile time and flag-gated at runtime. Built without the
+feature the route returns <b>501</b> (not 404) so clients can detect the capability. Without
+weights, the daemon logs loudly and serves everything else normally.</p>
+
+<div class="callout"><b>Dogfooding note:</b> the model was trained with NEDB's own parser as
+corpus generator (200,000 pairs in 16.5 s, perfect labels), grader (parsed-plan equality, not
+string equality) and gate (no example enters unless it round-trips to a canonically identical
+plan). Training lineage — datasets → runs → checkpoints → evals — lives in a NEDB database,
+chained by <code>caused_by</code>. The engine did not just host the model; it built and audited
+it.</div>
+
+  <div class="editlink">Found something wrong or missing? <a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — these pages are generated from <code>tools/build_docs_site.py</code>.</div>
+  <div class="pager"><a class="prev" href="replication.html"><small>← Previous</small>Replication</a><a class="next" href="clients.html"><small>Next →</small>Clients &amp; Adapters</a></div>
+</div></main>
+</div>
+<script>
+function filterPages(q){
+  q=q.toLowerCase();
+  document.querySelectorAll('.sidebar a.item').forEach(a=>{
+    a.style.display = a.textContent.toLowerCase().includes(q) ? 'block':'none';
+  });
+}
+</script>
+</body>
+</html>

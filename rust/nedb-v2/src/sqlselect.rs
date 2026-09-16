@@ -41,6 +41,7 @@
 use crate::sqljoin::{self, JoinExec, Strategy};
 use crate::sqlplan::{Plan, Stage};
 use crate::sqlpush::Pushdown;
+use crate::wallclock::WallClock;
 
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
@@ -410,10 +411,11 @@ pub struct TableRef {
     /// can express the query worth having: one relation AS OF a past sequence
     /// joined against another at the tip, which is how you ask what changed.
     ///
-    /// A sequence, never a wall-clock time. NEDB's history is
-    /// sequence-addressed and never garbage-collected, so a seq is exact where
-    /// a timestamp would be approximate — the same refusal the translator has
-    /// always made, made in the same words.
+    /// The resolved time-travel marker: either the sequence a bare integer
+    /// named directly, or the sequence a quoted datetime resolved to through
+    /// `Db::seq_at` (the last seq whose write-time is at or before the
+    /// moment). Execution sees a sequence either way — wall-clock parsing and
+    /// resolution live in the parser + resolver, never in the executor.
     pub as_of: Option<u64>,
     /// `FROM orders VALID AS OF '2026-01-01'` — bi-temporal: what was believed
     /// TRUE as of that date, as distinct from what the log SAID at a sequence.
@@ -1349,10 +1351,20 @@ impl Parser {
             return Ok(TableRef { name: fname, alias, sub: None, args: Some(args), col_aliases, lateral: false, as_of: None, valid_as_of: None, search: None, trace: None, trace_reverse: false, traverse: None });
         }
 
-        // `AS OF SYSTEM TIME <seq>` is read BEFORE the alias, because `AS` is
-        // the first token of both this and `AS <alias>`. The word after `AS`
-        // decides which one it is, and `parse_table_alias` would otherwise
-        // consume `OF` as the alias and leave `SYSTEM TIME 42` in the stream.
+        // `AS OF SYSTEM TIME <target>` is read BEFORE the alias, because `AS`
+        // is the first token of both this and `AS <alias>`. The word after
+        // `AS` decides which one it is, and `parse_table_alias` would
+        // otherwise consume `OF` as the alias and leave `SYSTEM TIME 42` in
+        // the stream.
+        //
+        // The target resolves by TYPE, never by guessing: a quoted string is a
+        // wall-clock moment (ISO datetime or date, UTC or unix), a bare
+        // integer is a NEDB sequence — byte-identical behavior to before this
+        // accepted datetimes, because every existing caller passes bare
+        // integers. A wall-clock moment resolves to the last seq whose
+        // write-time is at or before it (see `Db::seq_at`); the resolver
+        // reports "could not determine" rather than guessing, and compaction
+        // is reported as history no longer being available.
         let as_of = if self.peek().is_kw("AS") && self.peek_at(1).is_kw("OF") {
             self.next();
             self.next();
@@ -1360,11 +1372,11 @@ impl Parser {
             self.expect_kw("TIME")?;
             match self.next() {
                 Tok::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(n as u64),
+                Tok::Str(s) => Some(WallClock::parse(&s)?.as_marker()),
                 other => bail!(
-                    "AS OF SYSTEM TIME takes a NEDB sequence number here, not a timestamp \
-                     (got {:?}). NEDB's history is sequence-addressed and never \
-                     garbage-collected, so a seq is exact where a wall-clock time would be \
-                     approximate",
+                    "AS OF SYSTEM TIME takes a sequence number or a quoted datetime \
+                     (got {:?}). Bare integers stay sequence numbers — exact, never \
+                     garbage-collected; quote a datetime to travel by wall clock",
                     other
                 ),
             }
@@ -4824,18 +4836,41 @@ mod parser_tests {
     }
 
     #[test]
-    fn a_wall_clock_as_of_is_refused_with_the_reason() {
-        // NEDB's history is sequence-addressed, so a timestamp would be an
-        // approximation of an exact thing. Same refusal the translator makes,
-        // in the same words, because a client should not learn two answers.
+    fn a_quoted_datetime_is_a_wall_clock_marker_and_garbage_still_refuses() {
+        // Quoted datetimes are wall-clock moments: the marker is TAGGED with
+        // the high bit so no bare sequence can ever collide with it, and the
+        // resolver turns it into a real seq where the Db is in hand. Garbage
+        // (`now()`, negatives, fractions) still refuses, naming the accepted
+        // forms.
+        let s = parse("SELECT _id FROM orders AS OF SYSTEM TIME '2026-09-15T17:00:00Z'")
+            .expect("a quoted RFC 3339 datetime is accepted");
+        let marker = s.from.unwrap().as_of.expect("the marker is set");
+        assert_ne!(marker & crate::wallclock::WALL_CLOCK_FLAG, 0,
+            "the marker must be wall-clock-tagged, not a bare seq");
+        let decoded = crate::wallclock::WallClock::from_marker(marker)
+            .expect("the marker decodes");
+        assert_eq!(decoded.epoch_secs(), 1_789_491_600.0); // ground-truthed vs Python datetime
+
+        // A bare integer is NEVER tagged — the whole backcompat contract.
+        let s = parse("SELECT _id FROM orders AS OF SYSTEM TIME 42").unwrap();
+        let marker = s.from.unwrap().as_of.unwrap();
+        assert_eq!(marker, 42);
+        assert_eq!(marker & crate::wallclock::WALL_CLOCK_FLAG, 0);
+
         for sql in [
-            "SELECT total FROM orders AS OF SYSTEM TIME '2026-01-01'",
             "SELECT total FROM orders AS OF SYSTEM TIME now()",
             "SELECT total FROM orders AS OF SYSTEM TIME -1",
             "SELECT total FROM orders AS OF SYSTEM TIME 1.5",
+            "SELECT total FROM orders AS OF SYSTEM TIME 'not a time'",
         ] {
             let e = parse(sql).unwrap_err().to_string();
-            assert!(e.contains("sequence number"), "{} -> {}", sql, e);
+            assert!(
+                e.contains("sequence number or a quoted datetime")
+                    || e.contains("unrecognized datetime"),
+                "{} -> {} (neither the grammar's nor the parser's refusal)",
+                sql,
+                e
+            );
         }
     }
 

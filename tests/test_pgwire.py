@@ -262,9 +262,18 @@ def run_suite(pg_port, cause_hash):
           "no sequence in 0..15 showed two rows")
     check("...using Postgres's own time-travel spelling", True)
 
-    e = err("SELECT * FROM orders AS OF SYSTEM TIME '2026-01-01'")
-    check("a wall-clock AS OF is refused with the reason",
-          e is not None and "sequence number" in e, str(e)[:110])
+    e = err("SELECT * FROM orders AS OF SYSTEM TIME 'not a time'")
+    check("a garbage AS OF is refused naming the accepted forms",
+          e is not None and ("sequence number or a quoted datetime" in e
+                             or "unrecognized datetime" in e), str(e)[:110])
+    # A quoted datetime now RESOLVES through the wall-clock index: the last
+    # seq whose write-time is at or before the moment. A far-future moment
+    # clamps to the tip — the same answer AS OF a bare seq past the head gives.
+    _, future_rows = q("SELECT _id FROM orders AS OF SYSTEM TIME '2099-01-01T00:00:00Z'")
+    _, tip_rows = q("SELECT _id FROM orders")
+    check("a wall-clock AS OF resolves (far future = tip)",
+          sorted(r[0] for r in future_rows) == sorted(r[0] for r in tip_rows),
+          f"future={future_rows} tip={tip_rows}")
 
     cols, rows = q("SELECT _id, _hash FROM audit ORDER BY _id")
     check("provenance columns are selectable by name",

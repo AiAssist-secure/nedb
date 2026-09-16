@@ -776,9 +776,73 @@ class NEDB:
     def query(self, nql: str) -> List[dict]:
         return self.execute(parse_nql(nql))
 
+    # --- wall-clock AS OF ---------------------------------------------------
+    #
+    # The Rust engine resolves `AS OF SYSTEM TIME '<datetime>'` through a
+    # (ts, seq) index built by its cold scan; this reference implementation
+    # resolves against the in-memory log, which carries the same per-write
+    # `ts` stamps. Same rule both engines: the LAST seq whose write-time is
+    # at or before the moment. Bare integers never reach here — they stay
+    # sequences, bit-for-bit, in both engines.
+
+    @staticmethod
+    def _parse_wall_clock(raw: str) -> float:
+        """Parse an accepted wall-clock form to epoch seconds.
+
+        Accepted: ISO datetime/date (naive = UTC; offsets incl. Z honored),
+        and unix seconds/millis ONLY with an explicit `s`/`ms` unit — a bare
+        integer is a sequence and never reaches this parser in either engine.
+        """
+        import time as _time
+        from datetime import datetime as _dt, timezone as _tz
+        s = raw.strip()
+        if not s:
+            raise SyntaxError("NQL: AS OF datetime is empty")
+        low = s.lower()
+        if low.endswith(("ms", "s")) and any(c.isdigit() for c in low):
+            unit = "ms" if low.endswith("ms") else "s"
+            digits = low[: -len(unit)]
+            try:
+                v = float(digits)
+            except ValueError:
+                v = None
+            if v is not None:
+                return v / (1000.0 if unit == "ms" else 1.0)
+        try:
+            # fromisoformat handles `YYYY-MM-DD`, with `T` or space, and the
+            # `+HH:MM` offset forms; Python 3.11+ also handles `Z` directly.
+            iso = s.replace("Z", "+00:00").replace("z", "+00:00")
+            dt = _dt.fromisoformat(iso)
+        except ValueError:
+            raise SyntaxError(
+                f"NQL: AS OF datetime {raw!r} is not an accepted form "
+                "(ISO 8601 date or datetime, or unix seconds/millis with an explicit s/ms unit)"
+            )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)  # naive means UTC — stated, not guessed
+        return dt.timestamp()
+
+    def _resolve_wall_clock(self, raw: str) -> int:
+        """The last seq whose write-time is at or before the parsed moment."""
+        moment = self._parse_wall_clock(raw)
+        best: Optional[int] = None
+        for rec in self.log.ops:
+            if rec.ts <= moment:
+                if best is None or rec.seq > best:
+                    best = rec.seq
+        if best is None:
+            raise LookupError(
+                "NQL: no writes at or before that moment in this database — "
+                "nothing existed yet (wall-clock AS OF answers about the past; "
+                "there is no past here yet)"
+            )
+        return best
+
     def execute(self, plan: dict) -> List[dict]:
         coll = plan["from"]
         as_of = plan.get("as_of")
+        if plan.get("as_of_is_datetime"):
+            as_of = self._resolve_wall_clock(as_of)
         prefix = coll + ":"
         where = plan.get("where", [])
         predicate = plan.get("predicate")
