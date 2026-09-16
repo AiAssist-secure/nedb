@@ -1044,7 +1044,7 @@ SHELL = """<!DOCTYPE html>
 <button class="menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
 <div class="layout">
 <nav class="sidebar">
-  <a class="brand" href="index.html"><span class="dot"></span>NEDB Docs <small>v8.0.0</small></a>
+  <a class="brand" href="index.html"><span class="dot"></span>NEDB Docs <small id="docsver">v8.0.0</small></a>
   <div class="search"><input type="search" placeholder="Filter pages…" oninput="filterPages(this.value)"></div>
   {nav}
 </nav>
@@ -1055,6 +1055,18 @@ SHELL = """<!DOCTYPE html>
   <div class="pager">{pager}</div>
 </div></main>
 </div>
+<script>
+(function () {{
+  var el = document.getElementById("docsver");
+  if (!el) return;
+  fetch("https://pypi.org/pypi/nedb-engine/json")
+    .then(function (r) {{ return r.json(); }})
+    .then(function (d) {{
+      if (d && d.info && d.info.version) el.textContent = "v" + d.info.version;
+    }})
+    .catch(function () {{}});
+}})();
+</script>
 <script>
 function filterPages(q){{
   q=q.toLowerCase();
