@@ -1112,7 +1112,7 @@ def build():
         if slug != "index":
             crumbs = f'<a href="index.html">NEDB Docs</a> / {html_mod.escape(group)} / {html_mod.escape(title)}'
         editlink = ('<div class="editlink">Found something wrong or missing? '
-                    '<a href="https://github.com/Eth-Interchained/nedb/edit/master/tools/build_docs_site.py" '
+                    '<a href="https://github.com/aiassistsecure/nedb/edit/master/tools/build_docs_site.py" '
                     'target="_blank" rel="noopener noreferrer">Edit the source</a> and rebuild — '
                     'these pages are generated from <code>tools/build_docs_site.py</code>.</div>'
                     ) if slug != "index" else ""
