@@ -16,5 +16,5 @@ Usage:
 
 from .client import NedbClient, NedbError
 
-__version__ = "10.30.91"
+__version__ = "10.30.92"
 __all__ = ["NedbClient", "NedbError"]
