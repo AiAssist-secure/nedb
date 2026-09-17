@@ -54,6 +54,11 @@ ol.track{list-style:none;counter-reset:step;padding:56px 0 0}
 .terminal .o{color:#5b667d;font-style:italic}
 .terminal .g{color:var(--emerald)}
 .terminal .y{color:var(--amber2)}
+/* Lost / failed output. `.r` already exists but is scoped to `.bar` as the
+   traffic-light dot, so a bare `.r` inside a <pre> silently rendered
+   unstyled -- the `null` in case A below is the single most important
+   character on this page and it has to READ as a loss. */
+.terminal .lost{color:var(--rose);font-weight:600}
 .note{background:rgba(52,211,153,.06);border:1px solid rgba(52,211,153,.25);border-radius:11px;padding:12px 16px;font-size:13.5px;color:var(--dim);margin:12px 0}
 .note b{color:var(--emerald)}
 .warn{background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.3);border-radius:11px;padding:12px 16px;font-size:13.5px;color:var(--dim);margin:12px 0}
@@ -86,6 +91,8 @@ footer p{color:var(--dim);font-size:14px}
 .btn.primary{background:linear-gradient(92deg,var(--amber),#ea580c);border:none;color:#0b0e14}
 .credit{margin-top:36px;font-family:var(--mono);font-size:11px;color:var(--faint)}
 </style>
+<link rel="stylesheet" href="../assets/docs-translate.css">
+<script defer src="../assets/docs-translate.js"></script>
 </head>
 <body>
 
@@ -107,40 +114,40 @@ footer p{color:var(--dim);font-size:14px}
 <ol class="track">
 
 <li class="step">
-  <h2>Clone the source</h2>
-  <p class="why">The <b>canonical repo</b> — engine, Rust core, the test suites, the benchmark scripts, the vendored PostgreSQL grammar.</p>
+  <h2>Get the source on your machine</h2>
+  <p class="why">Two paths. If you only want to <b>use</b> the engine, the registries are enough — skip to step 3. If you want to <b>verify</b> it, audit it, or run the full test suites and benchmarks, clone the source first: everything below runs from the same checkout the releases ship from.</p>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal</span></div>
   <pre><span class="p">$</span> git clone https://github.com/aiassistsecure/nedb
 <span class="p">$</span> <span class="c">cd</span> nedb
 <span class="p">$</span> git log --oneline -1
-<span class="o"># you are on the same master the releases ship from</span></pre></div>
-  <div class="note"><b>Verify it's real:</b> 500+ commits, 170+ version tags, and every release tag ever cut is in <code>git tag</code> — the release history is the audit trail.</div>
+<span class="o"># note the commit — every release tag is also in the history:</span>
+<span class="p">$</span> git tag | tail -5</pre></div>
+  <p class="why">What you should see: <code>git log</code> on the current master, and a wall of version tags — the repo has shipped <b>170+ releases</b>, one per line of <code>git tag</code>. The release history <i>is</i> the audit trail; this database does not just store auditable data, its own development is auditable the same way.</p>
+  <div class="note"><b>Why this matters:</b> every claim on the README maps to a test file or a benchmark script in this tree. The rest of this walkthrough runs them, so nothing stays a claim.</div>
 </li>
 
 <li class="step">
-  <h2>Install from the live registries — the products, not the checkout</h2>
-  <p class="why">Evaluate what users get. Three registries, <b>same version, same tag</b> — the tri-distribution discipline.</p>
-  <div class="grid3">
-    <div class="card"><h3>PyPI</h3><p>pip install nedb-engine</p></div>
-    <div class="card"><h3>npm</h3><p>npm install nedb-engine</p></div>
-    <div class="card"><h3>crates.io</h3><p>cargo add nedb-engine</p></div>
-  </div>
+  <h2>Install from the registries — and check what actually shipped</h2>
+  <p class="why">Evaluate what users get, not the checkout: the packages on PyPI, npm and crates.io are built by the release pipeline from a single git tag, all three carrying the <b>same version at the same moment</b>.</p>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python side</span></div>
   <pre><span class="p">$</span> python3 -m venv venv && <span class="c">source</span> venv/bin/activate
 <span class="p">$</span> pip install nedb-engine
 <span class="p">$</span> python3 -c <span class="s">"import nedb; print(nedb.__version__)"</span>
 <span class="g">9.0.0</span>
-<span class="p">$</span> which nesql nedbd        <span class="o"># the CLI + daemon binaries ride along</span></pre></div>
+<span class="p">$</span> which nesql nedbd
+<span class="o"># both binaries should be on PATH — the compiled Rust tools ship inside the wheel</span></pre></div>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — node side</span></div>
-  <pre><span class="p">$</span> mkdir nedb-node-demo && <span class="c">cd</span> nedb-node-demo && npm init -y
-<span class="p">$</span> npm install nedb-engine
-<span class="p">$</span> node -e <span class="s">"const {NedbCore}=require('nedb-engine'); console.log('loaded ok')"</span></pre></div>
-  <div class="note"><b>What proves what:</b> if the install worked, the version printed matches the latest git tag, and the <code>nesql</code> CLI binary is on your PATH — the same compiled Rust binary the engine's release train stages into every wheel and tarball.</div>
+  <pre><span class="p">$</span> mkdir nedb-node-demo && <span class="c">cd</span> nedb-node-demo
+<span class="p">$</span> npm init -y && npm install nedb-engine
+<span class="p">$</span> node -e <span class="s">"const {NedbCore}=require('nedb-engine'); console.log(typeof NedbCore)"</span>
+<span class="g">function</span></pre></div>
+  <p class="why">What you just verified: the version matches the latest git tag from step 1, the <code>nesql</code> and <code>nedbd</code> binaries ride along on the Python install, and the Node addon loads as a real napi binding — not a stub. On platforms without a prebuilt binary, the Python package falls back to a pure-Python core (slower, same behavior); Node has no fallback, so check the platform table in the README.</p>
+  <div class="note"><b>The tri-distribution discipline:</b> one tag publishes all three registries at once. If the versions ever disagree, that is a release bug — file it, because the whole point is lockstep.</div>
 </li>
 
 <li class="step">
-  <h2>Run the real engine — write, query, time-travel, verify</h2>
-  <p class="why">60 seconds of <b>actual usage</b>: every core claim of the README, executed by you.</p>
+  <h2>Run the engine — write, query, time-travel, verify (Python)</h2>
+  <p class="why">The core semantics, executed by you. This is the block that proves the four claims: durable storage, time travel, causal provenance, tamper evidence.</p>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python</span></div>
   <pre><span class="p">$</span> python3 &lt;&lt;'EOF'
 <span class="c">from</span> nedb <span class="c">import</span> NEDB
@@ -148,30 +155,153 @@ footer p{color:var(--dim);font-size:14px}
 db = NEDB(<span class="s">"./mydata"</span>)          <span class="o"># durable, hash-chained</span>
 db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span class="s">"name"</span>: <span class="s">"Ann"</span>, <span class="s">"age"</span>: <span class="y">31</span>})
 
-snap = db.seq                                   <span class="o"># time travel marker</span>
+<span class="o"># 1) TIME TRAVEL — every version is kept, so any past seq is reachable</span>
+snap = db.seq
 db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span class="s">"name"</span>: <span class="s">"Ann"</span>, <span class="s">"age"</span>: <span class="y">32</span>})
-<span class="c">print</span>(db.get(<span class="s">"users"</span>, <span class="s">"alice"</span>, as_of=snap)[<span class="s">"age"</span>])   <span class="g"># → 31 — the past is reachable</span>
+<span class="c">print</span>(db.get(<span class="s">"users"</span>, <span class="s">"alice"</span>, as_of=snap)[<span class="s">"age"</span>])
+<span class="g">31</span>   <span class="o"># ← the version AT that sequence, not the current one</span>
 
+<span class="o"># 2) CAUSAL PROVENANCE — a write can cite the writes that caused it</span>
 db.put(<span class="s">"inputs"</span>, <span class="s">"m1"</span>, {<span class="s">"text"</span>: <span class="s">"prefers dark mode"</span>})
 seq = db.seq
-db.put(<span class="s">"beliefs"</span>, <span class="s">"b1"</span>, {<span class="s">"v"</span>: <span class="y">1</span>}, caused_by=[seq])  <span class="o"># causal edge</span>
-<span class="c">print</span>(db.query(<span class="s">'FROM beliefs WHERE _id = "b1" TRACE caused_by'</span>))
-<span class="c">print</span>(<span class="s">"verify:"</span>, db.verify())                      <span class="g"># → True — chain intact</span>
+db.put(<span class="s">"beliefs"</span>, <span class="s">"b1"</span>, {<span class="s">"v"</span>: <span class="y">1</span>}, caused_by=[seq])
+r = db.query(<span class="s">'FROM beliefs WHERE _id = "b1" TRACE caused_by'</span>)
+<span class="c">print</span>(r[<span class="y">0</span>][<span class="s">"_id"</span>])
+<span class="g">m1</span>   <span class="o"># ← the causal PARENT, walked automatically</span>
+
+<span class="o"># 3) TAMPER EVIDENCE — the chain either verifies or it does not</span>
+<span class="c">print</span>(db.verify())
+<span class="g">True</span>
 EOF</pre></div>
-  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — node</span></div>
-  <pre><span class="p">$</span> node -e <span class="s">"
-const { NedbCore } = require('nedb-engine');
-const db = new NedbCore();
-db.put('users','bob', JSON.stringify({age:24}));
-console.log('rows:', db.query('FROM users WHERE age > 20').length);  // 1
-console.log('verify:', db.verify());                                 // true
-"</span></pre></div>
-  <div class="note"><b>The one that matters:</b> <code>db.verify()</code>. Flip a byte in <code>./mydata</code> with a hex editor and run it again — the verdict flips to <code>False</code>. Tamper evidence you can break on purpose.</div>
+  <p class="why">What happened, line by line: the first <code>put</code> wrote version 1 of <code>alice</code> and assigned it a sequence number. <code>db.seq</code> captured that position. The second <code>put</code> wrote version 2 at a new sequence — nothing overwrote anything. <code>get(as_of=snap)</code> walked the version chain back to exactly that point. The <code>caused_by</code> array on the second put declared a causal edge, and <code>TRACE</code> walked it. <code>verify()</code> recomputed the entire BLAKE2b chain and compared.</p>
+  <div class="warn"><b>Break it on purpose:</b> open <code>./mydata</code> in a hex editor, flip one byte, run <code>verify()</code> again → <code>False</code>. That is the whole product in one demo: the tamper is not hidden, it is <i>detected</i>. Restore the byte and verify returns to True.</div>
+  <div class="note"><b>Also try:</b> <code>db.query('FROM users AS OF ' + str(snap))</code> — the whole collection as it was. And <code>db.head</code> — the current Merkle head, a 64-char BLAKE2b commitment that changes on every write.</div>
 </li>
 
 <li class="step">
-  <h2>Run the nesql CLI — plain SQL, both dialects</h2>
-  <p class="why">The same store, spoken to in <b>PostgreSQL SQL and the FROM-form</b> — routed structurally, no flags.</p>
+  <h2>The same in Node — the full napi surface</h2>
+  <p class="why">The Node binding is the same Rust core behind a real typed API. This walks the <b>entire</b> surface: durable opens, indexes, time travel, the neSQL router, graph edges, replication contract, and the flush discipline. Every output below is a real captured run.</p>
+
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>step 1 — durable open + indexes + writes</span></div>
+  <pre><span class="p">$</span> node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./store');        // durable — writes land on flush
+db.createIndex('orders', 'status', 'eq');   // eq | sorted | search
+db.put('orders', 'o1', JSON.stringify({who:'acme', total:100, status:'paid'}));
+db.put('orders', 'o2', JSON.stringify({who:'globex', total:250, status:'open'}));
+console.log('seq:', db.seq().toString());
+"</span>
+<span class="g">seq: 2</span>   <span class="o">// BigInt — the next-to-assign counter</span></pre></div>
+  <p class="why">Key facts about the surface, learned by running it: documents go in as <b>JSON strings</b> and come back as JSON strings (the binding is a thin, honest layer over the Rust core — no silent re-shapes). <code>seq()</code> returns a <b>BigInt</b> because sequence numbers are 64-bit. <code>NedbCore.open</code> is durable; <code>new NedbCore()</code> is in-memory. The wrapper arms signal handlers so a <code>SIGINT</code> flushes before exit — set <code>NEDB_NO_EXIT_FLUSH=1</code> if your app manages its own shutdown.</p>
+
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>step 2 — time travel + the full document metadata</span></div>
+  <pre><span class="p">$</span> node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./store');
+const snap = db.seq();                       // capture before the update
+db.put('orders','o1', JSON.stringify({who:'acme', total:140, status:'paid'}));
+console.log('current :', db.get('orders','o1'));
+console.log('as-of   :', db.getAsOf('orders','o1', snap - 1n));
+"</span>
+<span class="g">current : {"who":"acme","total":140,"status":"paid","_id":"o1","_hash":"e4ce19…","_seq":4,"_coll":"orders"}</span>
+<span class="g">as-of   : {"who":"acme","total":100,…,"_seq":1,…}</span></pre></div>
+  <p class="why">Read the metadata that came back: every document carries <code>_id</code>, <code>_hash</code> (BLAKE2b of the content), <code>_seq</code> (its position in the log), and <code>_coll</code>. These are real columns — filterable, selectable, sortable in queries. <code>getAsOf</code> takes a <b>BigInt</b> sequence (pass <code>snap - 1n</code> to see the version <i>before</i> your last write). Deletes are the same shape: <code>db.delete('orders','o1')</code> writes a tombstone — the current read returns null, and <code>getAsOf</code> at any earlier sequence still returns the document, because a delete is history, not erasure.</p>
+
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>step 3 — neSQL from Node: both dialects, one method</span></div>
+  <pre><span class="p">$</span> node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./store');
+console.log(db.nesql('SELECT who, total FROM orders WHERE total > 100'));
+console.log(db.nesql('FROM orders WHERE status = \"paid\"'));
+console.log(db.nesqlDialect('FROM orders WHERE total > 100'));
+"</span>
+<span class="g">[ '{"who":"acme","total":140}', '{"who":"globex","total":250}' ]</span>
+<span class="g">[ '{"who":"acme","total":100,"status":"paid",…}' ]</span>
+<span class="g">nql</span></pre></div>
+  <p class="why"><code>nesql()</code> accepts <b>both halves of the language</b> — PostgreSQL SQL and the FROM-form — and routes on the leading keyword, structurally. <code>nesqlDialect()</code> tells you which half a statement was read as, so a routing surprise is debuggable instead of mysterious. SQL statements run through the full evaluator (joins, subqueries, set operations); FROM-form statements run through the native clause path. One engine underneath both.</p>
+
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>step 4 — graph edges + the replication contract</span></div>
+  <pre><span class="p">$</span> node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./store');
+db.link('users:alice', 'bought', 'orders:o1');
+console.log('neighbors:', db.neighbors('users:alice','bought'));
+console.log('inbound  :', db.inbound('orders:o1','bought'));
+console.log('tip      :', db.tip().slice(0,70));
+console.log('since    :', db.since(0n, 10).slice(0,70));      // BigInt cursor!
+console.log('scan     :', db.scanStatus().slice(0,70));
+console.log('verify   :', db.verify(), '| head:', db.head().slice(0,16));
+db.flush();
+"</span>
+<span class="g">neighbors: [ 'orders:o1' ]</span>
+<span class="g">inbound  : [ 'users:alice' ]</span>
+<span class="g">tip      : {"_from":"users:alice","_rel":"bought","_to":"orders:o1",…}</span>
+<span class="g">since    : {"nodes":[…],"from_seq":0,"to_seq":6,"head_seq":6,"has_more":false}</span>
+<span class="g">scan     : {"scan_complete":true,"seq_index_ready":false,"tip_seq":6,…}</span>
+<span class="g">verify   : true | head: a904934249721d5a</span></pre></div>
+  <p class="why">Four things worth noticing. <b>Links</b> are real edges — <code>neighbors</code> walks forward, <code>inbound</code> walks backward, both have <code>*AsOf</code> variants for graph queries at a past sequence. <b><code>tip()</code></b> returns the literal latest write — note the link itself is a stored document in the DAG, not a foreign key. <b><code>since()</code></b> is the changefeed: pass a <b>BigInt</b> cursor (a plain <code>0</code> throws — this bites everyone once) and it pages every node after it, with <code>has_more</code> telling you whether to keep draining. <b><code>scanStatus()</code></b> reports replication readiness: gate followers on <code>seq_index_ready</code>, not <code>scan_complete</code> — on a warm boot the seq index is deliberately empty, and a follower that trusted <code>scan_complete</code> would believe it is caught up while holding nothing.</p>
+
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>step 5 — durability: prove the flush discipline yourself</span></div>
+  <pre><span class="c"># A — put, then kill -9 immediately. THE WRITE IS LOST.</span>
+<span class="p">$</span> rm -rf dur-a &amp;&amp; node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./dur-a');
+db.put('k','1', JSON.stringify({v:'survives'}));
+process.kill(process.pid, 'SIGKILL');      // no flush, no time to tick
+"</span>
+<span class="p">$</span> node -e <span class="s">"const { NedbCore } = require('nedb-engine');
+console.log(NedbCore.open('./dur-a').get('k','1'));"</span>
+<span class="lost">null</span>
+
+<span class="c"># B — put, flush(), then kill -9. THE WRITE SURVIVES.</span>
+<span class="p">$</span> rm -rf dur-b &amp;&amp; node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./dur-b');
+db.put('k','1', JSON.stringify({v:'survives'}));
+db.flush();                                // &lt;-- the whole lesson
+process.kill(process.pid, 'SIGKILL');
+"</span>
+<span class="p">$</span> node -e <span class="s">"const { NedbCore } = require('nedb-engine');
+console.log(NedbCore.open('./dur-b').get('k','1'));"</span>
+<span class="g">{"v":"survives","_id":"1","_hash":"…","_seq":1,"_coll":"k"}</span>
+
+<span class="c"># C — put, wait past one 1000ms tick, then kill -9. ALSO SURVIVES.</span>
+<span class="p">$</span> rm -rf dur-c &amp;&amp; node -e <span class="s">"
+const { NedbCore } = require('nedb-engine');
+const db = NedbCore.open('./dur-c');
+db.put('k','1', JSON.stringify({v:'survives'}));
+setTimeout(() =&gt; process.kill(process.pid, 'SIGKILL'), 1500);
+"</span>
+<span class="p">$</span> node -e <span class="s">"const { NedbCore } = require('nedb-engine');
+console.log(NedbCore.open('./dur-c').get('k','1'));"</span>
+<span class="g">{"v":"survives","_id":"1","_hash":"…","_seq":1,"_coll":"k"}</span></pre></div>
+  <p class="why"><b>Run A first, and expect to lose the write.</b> That is not a bug and it is the most useful thing on this page: <code>put()</code> returns <em>before</em> its index entry is durable. A acknowledges, then dies inside the same millisecond — no <code>flush()</code> called, and the 1-second manifest ticker never got a chance to fire — so there is nothing on disk to find. B and C are the two ways to close that window: ask for durability explicitly, or let the ticker arrive. (Your <code>_hash</code> will not match a value printed here and is not meant to — it is elided above for that reason; what you are checking is <code>null</code> versus a document.)</p>
+
+  <p class="why">The contract, stated plainly: <b>an acknowledged write is on disk within one tick, or at exit — whichever comes first.</b> So what you can lose to a hard kill or a power cut is bounded at <b>the last 1000 ms of acknowledged writes</b> (<code>NEDB_FLUSH_MS</code> tunes it; min 50, <code>0</code> disables the ticker when your host owns its own cadence).</p>
+
+  <div class="note"><b>The flush discipline — what to actually do in your app.</b> Do not call <code>flush()</code> after every <code>put()</code> unless you mean it: it is an fsync, and the benchmark cost is real (≈7.9K/s durable vs ≈78K/s buffered). Pick per write class:
+  <ul>
+    <li><b>Money, orders, auth, anything you would refund or apologise for</b> — <code>flush()</code> before you acknowledge to your own caller. Treat the write as unacknowledged until it returns.</li>
+    <li><b>Batches and imports</b> — one <code>flush()</code> at the end of the batch, not per row. You get one fsync instead of N and the same guarantee for the batch as a whole.</li>
+    <li><b>Telemetry, caches, feeds, anything you would re-derive</b> — no explicit flush. The ticker is exactly the right tool and a bounded 1-second loss is the correct trade.</li>
+    <li><b>Short-lived processes</b> — a script that writes and exits within a tick is <em>case A</em>. A CLI, a lambda, a cron job or a test that does not flush before returning can lose everything it wrote. This is the sharpest edge in the whole API, because on a graceful exit the exit hook hides it and you only find out the first time something kills you.</li>
+  </ul></div>
+
+  <div class="note"><b>Which mechanism saves you, and when.</b> Three separate things, and they are not interchangeable:
+  <ul>
+    <li><code>flush()</code> — synchronous, immediate, works under <em>any</em> death including <code>SIGKILL</code>, because the bytes are already down before the call returns.</li>
+    <li><b>the 1000 ms manifest ticker</b> — armed by a durable <code>open()</code> in both bindings. This is what saves case C, and the only thing that bounds your loss on <code>kill -9</code>, an OOM-kill, or a power cut.</li>
+    <li><b>the exit hook</b> — covers the last partial tick on a <em>graceful</em> exit: a normal return, <code>SIGINT</code>, <code>SIGTERM</code>. It cannot help with <code>SIGKILL</code>, which POSIX makes impossible to catch, block or ignore. An earlier version of this page credited the exit hook for surviving <code>SIGKILL</code>; that was wrong in the one way worth being loud about, because it named a mechanism that is guaranteed not to run and so taught the opposite of the discipline above.</li>
+  </ul></div>
+
+  <p class="why">The full contract — every failure mode that motivated it, and the production incident that found it — is in <code>docs/DURABILITY.md</code>.</p>
+
+  <div class="note"><b>Full API surface in the binding:</b> <code>put, putEx, delete, deleteEx, get, getAsOf, query, nesql, nesqlDialect, createIndex, link, unlink, neighbors, neighborsAsOf, inbound, inboundAsOf, tip, tipCollection, since, scanStatus, verify, head, seq, flush</code> — check <code>Object.getOwnPropertyNames(Object.getPrototypeOf(db))</code> yourself. The <code>*Ex</code> variants carry client/nonce/idempotency-key fields for the CAS transaction paths.</div>
+</li>
+
+<li class="step">
+  <h2>The nesql CLI — SQL from a shell, exit codes as a contract</h2>
+  <p class="why">The same engine as a standalone binary: no daemon, no port, opens the store directly. Built for scripts as much as people — <b>the exit code carries the verdict</b>, so a shell pipeline can trust it.</p>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal</span></div>
   <pre><span class="p">$</span> nesql --db ./mydata query <span class="s">"SELECT name, age FROM users ORDER BY age DESC"</span>
 {<span class="s">"name"</span>:<span class="s">"Ann"</span>,<span class="s">"age"</span>:<span class="y">32</span>}
@@ -182,69 +312,77 @@ console.log('verify:', db.verify());                                 // true
 (1 rows, 1 scanned)
 
 <span class="p">$</span> nesql --db ./mydata version
-<span class="g">nesql    9.0.0  ·  engine 9.0.0  ·  grammar_v1 (digest)</span></pre></div>
-  <div class="note"><b>Exit codes are the contract:</b> <code>0</code> success · <code>1</code> failure · <code>2</code> usage · <code>3</code> could-not-determine · <code>4</code> not found · <code>5</code> unsupported. Try <code>nesql --db ./mydata get nosuch coll</code> and check <code>echo $?</code>.</div>
+<span class="g">nesql    9.0.0  ·  engine 9.0.0  ·  grammar_v1 (f82e7e02…)</span></pre></div>
+  <table>
+    <tr><th>exit</th><th>meaning</th></tr>
+    <tr><td>0</td><td>success — done, or the check ran and passed</td></tr>
+    <tr><td>1</td><td>failure — the operation ran and did not succeed</td></tr>
+    <tr><td>2</td><td>usage — the command line was not understood</td></tr>
+    <tr><td>3</td><td><b>could not determine</b> — pruned history (not a corrupt one!)</td></tr>
+    <tr><td>4</td><td>not found</td></tr>
+    <tr><td>5</td><td>unsupported</td></tr>
+  </table>
+  <div class="note"><b>Try the contract yourself:</b> <code>nesql --db ./mydata get users nobody; echo $?</code> → prints the not-found message and <code>1</code>. A missing document is exit 4; a missing database is exit 4 with a different message. Scripts can trust the difference.</div>
 </li>
 
 <li class="step">
-  <h2>Run the real test suites</h2>
-  <p class="why">The repo's own gates. These are the suites CI runs on every push — <b>now you run them too</b>.</p>
-  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python suites (from the clone)</span></div>
-  <pre><span class="p">$</span> <span class="c">cd</span> nedb
-<span class="p">$</span> python3 tests/test_nedb.py              <span class="o"># engine core</span>
+  <h2>Run the test suites — the same gates CI runs</h2>
+  <p class="why">These are not toy tests. The Python suites drive the real engine; the cross-engine parity suites assert the Python reference and the Rust core answer identically, query by query.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python suites</span></div>
+  <pre><span class="p">$</span> python3 tests/test_nedb.py              <span class="o"># engine core</span>
 <span class="g">11/11 passed</span>
 <span class="p">$</span> python3 tests/test_bitemporal.py        <span class="o"># both time axes</span>
 <span class="g">28/28 passed</span>
-<span class="p">$</span> python3 tests/test_nql_predicates.py    <span class="o"># cross-engine parity</span>
+<span class="p">$</span> python3 tests/test_nql_predicates.py    <span class="o"># cross-engine parity: predicates</span>
 <span class="g">257 passed</span>
-<span class="p">$</span> python3 tests/test_nql_shaping.py
+<span class="p">$</span> python3 tests/test_nql_shaping.py       <span class="o"># cross-engine parity: shaping</span>
 <span class="g">157 passed</span>
-<span class="p">$</span> python3 tests/test_wallclock_as_of.py   <span class="o"># AS OF by datetime</span>
+<span class="p">$</span> python3 tests/test_wallclock_as_of.py   <span class="o"># AS OF by datetime (new in 9.0)</span>
 <span class="g">25/25 passed</span></pre></div>
-  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — rust core (needs the Rust toolchain)</span></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — rust core</span></div>
   <pre><span class="p">$</span> <span class="c">cd</span> rust
 <span class="p">$</span> cargo test -p nedb-engine --lib
 <span class="g">639 passed</span>
-<span class="p">$</span> cargo test -p nedb-engine --tests      <span class="o"># integration, real subprocesses</span>
+<span class="p">$</span> cargo test -p nedb-engine --tests       <span class="o"># integration: real subprocesses, real stores</span>
 <span class="g">all targets green</span></pre></div>
-  <div class="note"><b>Cross-engine parity is the point:</b> <code>test_nql_predicates</code> and <code>test_nql_shaping</code> run the same battery through the Python reference <i>and</i> the Rust core and assert identical answers — the guarantee that the two engines cannot quietly disagree.</div>
+  <div class="note"><b>Why the parity suites matter:</b> two independent implementations of one language is how drift happens. These suites run the identical battery through both engines and refuse to pass if the answers differ by a byte. They have caught five real drifts; they will catch the next one.</div>
 </li>
 
 <li class="step">
-  <h2>Run the benchmarks — your machine, your numbers</h2>
-  <p class="why">Every published number in the repo names its machine and command. <b>Produce your own.</b></p>
+  <h2>Benchmarks — your machine, your numbers</h2>
+  <p class="why">The published numbers name their machine and their command. Run them yourself and compare <b>ratios</b>, not absolutes.</p>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — embedded core</span></div>
   <pre><span class="p">$</span> python3 bench/benchmarks.py --save
-<span class="o"># PUT ~63K/s · GET ~1.3M/s · AS OF (time-travel) reads ~940K/s</span>
-<span class="o"># your absolute numbers will differ; the RATIOS are the claim:</span>
-<span class="o"># time-travel reads cost ~30%, not 10x</span></pre></div>
+<span class="o"># writes ~63K/s · point reads ~1.3M/s · time-travel reads ~940K/s</span>
+<span class="o"># the ratio that matters: AS OF costs ~30%, not 10x — history is cheap</span></pre></div>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — the daemon over HTTP</span></div>
   <pre><span class="p">$</span> NEDBD_DAG=1 nedbd --data /tmp/perf &
 <span class="p">$</span> python3 tests/test_dag_perf.py --n 10000 --reads 100000
-<span class="o"># sequential writes · point reads · batch · tamper-verify throughput</span></pre></div>
+<span class="o"># writes ~420/s · reads ~480/s · batch ~1,100/s · p99 ≤ 4.3ms</span></pre></div>
   <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — indexed range scans</span></div>
   <pre><span class="p">$</span> python3 scripts/bench_index_range.py
 <span class="o"># point lookup 137ms → 0.01ms · BETWEEN 1% 186ms → 1.1ms</span></pre></div>
-  <div class="warn"><b>Honest numbers policy:</b> absolute figures are machine-specific and dated in the repo (<code>bench/RESULTS.md</code>, <code>docs/BENCH-sqlselect.md</code>). If your numbers diverge wildly from the published ratios, that's a finding — file it.</div>
+  <div class="warn"><b>Honest numbers policy:</b> the repo's published figures are dated snapshots with their machine named (<code>bench/RESULTS.md</code>, <code>docs/BENCH-sqlselect.md</code>). Your absolute numbers will differ. If the RATIOS diverge wildly from the published claims, that is a finding — file it.</div>
 </li>
 
 <li class="step">
   <h2>The full gate — daemon, wire protocols, tamper</h2>
-  <p class="why">The complete CI surface: <b>daemon HTTP, PostgreSQL wire, RESP2, encryption, crash boundaries</b>.</p>
-  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — the daemon, end to end</span></div>
-  <pre><span class="p">$</span> NEDBD_DAG=1 nedbd --data ./nedb-data &      <span class="o"># v2 DAG engine</span>
+  <p class="why">The complete CI surface on your box: <b>daemon HTTP, PostgreSQL wire, RESP2, encryption</b>.</p>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — the daemon end to end</span></div>
+  <pre><span class="p">$</span> NEDBD_DAG=1 nedbd --data ./nedb-data &
 <span class="p">$</span> curl http://127.0.0.1:7070/health
 <span class="g">{"ok":true,"version":"9.0.0","engine":"dag",...}</span>
-<span class="p">$</span> curl -X POST http://127.0.0.1:7070/v1/databases/shop/query \\
-    -H <span class="s">'Content-Type: application/json'</span> \\
-    -d <span class="s">'{"nql":"SELECT 1"}'</span>                   <span class="o"># SQL over HTTP</span>
-<span class="p">$</span> NEDBD_RESP2_PORT=6380 nedbd --data ./nedb-data &   <span class="o"># + redis-cli compat</span>
+<span class="p">$</span> curl -X POST http://127.0.0.1:7070/v1/databases/shop/query \
+    -H <span class="s">'Content-Type: application/json'</span> -d <span class="s">'{"nql":"SELECT 1"}'</span>
+<span class="o"># SQL over HTTP; the FROM-form works on the same route</span>
+<span class="p">$</span> NEDBD_RESP2_PORT=6380 nedbd --data ./nedb-data &   <span class="o"># redis-cli compat</span>
 <span class="p">$</span> redis-cli -p 6380 EVAL <span class="s">'FROM orders LIMIT 5'</span> 0
-<span class="p">$</span> python3 tests/test_pgwire.py               <span class="o"># real psql/libpq client</span></pre></div>
+<span class="p">$</span> python3 tests/test_pgwire.py               <span class="o"># real libpq client, 65 checks</span></pre></div>
   <div class="checklist"><ul>
     <li><b>Source cloned</b> — release history auditable via git tags</li>
     <li><b>Installed from all three registries</b> — one version on one tag</li>
-    <li><b>Core semantics proven</b> — time travel, provenance, verify</li>
+    <li><b>Core semantics proven</b> — time travel, provenance, verify, tamper</li>
+    <li><b>Node binding walked end to end</b> — full surface, BigInt gotchas and all</li>
     <li><b>Both SQL dialects through the CLI</b> — exit codes as contract</li>
     <li><b>Test suites green on your machine</b> — parity included</li>
     <li><b>Benchmarks run by you</b> — ratios match the claims</li>
