@@ -148,7 +148,7 @@ footer p{color:var(--dim);font-size:14px}
 <li class="step">
   <h2>Run the engine — write, query, time-travel, verify (Python)</h2>
   <p class="why">The core semantics, executed by you. This is the block that proves the four claims: durable storage, time travel, causal provenance, tamper evidence.</p>
-  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python</span></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>terminal — python (paste this whole block)</span></div>
   <pre><span class="p">$</span> python3 &lt;&lt;'EOF'
 <span class="c">from</span> nedb <span class="c">import</span> NEDB
 
@@ -159,7 +159,6 @@ db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span cl
 snap = db.seq
 db.put(<span class="s">"users"</span>, <span class="s">"alice"</span>, {<span class="s">"name"</span>: <span class="s">"Ann"</span>, <span class="s">"age"</span>: <span class="y">32</span>})
 <span class="c">print</span>(db.get(<span class="s">"users"</span>, <span class="s">"alice"</span>, as_of=snap)[<span class="s">"age"</span>])
-<span class="g">31</span>   <span class="o"># ← the version AT that sequence, not the current one</span>
 
 <span class="o"># 2) CAUSAL PROVENANCE — a write can cite the writes that caused it</span>
 db.put(<span class="s">"inputs"</span>, <span class="s">"m1"</span>, {<span class="s">"text"</span>: <span class="s">"prefers dark mode"</span>})
@@ -167,12 +166,14 @@ seq = db.seq
 db.put(<span class="s">"beliefs"</span>, <span class="s">"b1"</span>, {<span class="s">"v"</span>: <span class="y">1</span>}, caused_by=[seq])
 r = db.query(<span class="s">'FROM beliefs WHERE _id = "b1" TRACE caused_by'</span>)
 <span class="c">print</span>(r[<span class="y">0</span>][<span class="s">"_id"</span>])
-<span class="g">m1</span>   <span class="o"># ← the causal PARENT, walked automatically</span>
 
 <span class="o"># 3) TAMPER EVIDENCE — the chain either verifies or it does not</span>
 <span class="c">print</span>(db.verify())
-<span class="g">True</span>
 EOF</pre></div>
+  <div class="terminal"><div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>output — what you should see (do not paste)</span></div>
+  <pre><span class="g">31</span>   <span class="o"># ← the version AT that sequence, not the current one</span>
+<span class="g">m1</span>   <span class="o"># ← the causal PARENT, walked automatically</span>
+<span class="g">True</span> <span class="o"># ← the chain recomputed clean</span></pre></div>
   <p class="why">What happened, line by line: the first <code>put</code> wrote version 1 of <code>alice</code> and assigned it a sequence number. <code>db.seq</code> captured that position. The second <code>put</code> wrote version 2 at a new sequence — nothing overwrote anything. <code>get(as_of=snap)</code> walked the version chain back to exactly that point. The <code>caused_by</code> array on the second put declared a causal edge, and <code>TRACE</code> walked it. <code>verify()</code> recomputed the entire BLAKE2b chain and compared.</p>
   <div class="warn"><b>Break it on purpose:</b> open <code>./mydata</code> in a hex editor, flip one byte, run <code>verify()</code> again → <code>False</code>. That is the whole product in one demo: the tamper is not hidden, it is <i>detected</i>. Restore the byte and verify returns to True.</div>
   <div class="note"><b>Also try:</b> <code>db.query('FROM users AS OF ' + str(snap))</code> — the whole collection as it was. And <code>db.head</code> — the current Merkle head, a 64-char BLAKE2b commitment that changes on every write.</div>
